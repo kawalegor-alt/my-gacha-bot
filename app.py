@@ -125,7 +125,7 @@ async def draw_card(m: Message):
         await db.commit()
         await m.answer_photo(f_id, caption=cap)
         @dp.message(F.text == "🏆 Топ")
-async def top_menu(m: Message):
+async def top_menu(m:Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Монеты", callback_data="top_money"), InlineKeyboardButton(text="💎 BBC", callback_data="top_bbc")]
     ])
