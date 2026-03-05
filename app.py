@@ -6,6 +6,8 @@ from aiogram.types import Message, BotCommand, CallbackQuery, InlineKeyboardMark
 from aiogram.enums import ParseMode
 
 # --- КОНФИГУРАЦИЯ ---
+# ВНИМАНИЕ: Я оставил твой токен для работоспособности, 
+# но обязательно сгенерируй новый в BotFather, так как этот засветился!
 TOKEN = "8666119275:AAEBl4VeUTKGzj-WVrrb8asakNfgIqlqOQA"
 ADMIN_ID = 1548461377 
 DB_PATH = "/app/data/gacha_bot.db"
@@ -68,7 +70,9 @@ async def start_cmd(m: Message):
         await db.commit()
     await m.answer("✅ Готово! Пиши 'карта' или используй меню.", reply_markup=ReplyKeyboardRemove())
 
-@dp.message(Command("profile") | F.text.lower().contains("профиль"))
+# ИСПРАВЛЕНИЕ: Разделяем фильтры на два декоратора
+@dp.message(Command("profile"))
+@dp.message(F.text.lower().contains("профиль"))
 async def profile_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT nickname, rank, money, bbc_money, titles FROM users WHERE user_id = ?", (m.from_user.id,))
@@ -78,7 +82,9 @@ async def profile_cmd(m: Message):
         inv_cnt = (await res.fetchone())[0]
     await m.answer(f"<b>👤 Игрок:</b> {u[0]}\n🏅 <b>Ранг:</b> {u[1]}\n🏷 <b>Титул:</b> {u[4]}\n💰 <b>Монеты:</b> {u[2]}\n💎 <b>BBC:</b> {u[3]}\n🎴 <b>Карт:</b> {inv_cnt}", parse_mode=ParseMode.HTML)
 
-@dp.message(Command("draw") | F.text.lower().contains("карт"))
+# ИСПРАВЛЕНИЕ: Разделяем фильтры на два декоратора
+@dp.message(Command("draw"))
+@dp.message(F.text.lower().contains("карт"))
 async def draw_card(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT rank, last_draw, titles FROM users WHERE user_id = ?", (m.from_user.id,))
@@ -115,11 +121,13 @@ async def draw_card(m: Message):
             await db.execute("INSERT INTO inventory (user_id, card_id, count) VALUES (?,?,1)", (m.from_user.id, c_id))
             cap = f"🎉 НОВАЯ: {c_name} ({rarity}⭐)\n💰 +{rew}"
         
-        await db.execute("UPDATE users SET money=money+?, last_draw=? WHERE user_id=?", (rew, datetime.now().isoformat(), m.from_user.id))
+            await db.execute("UPDATE users SET money=money+?, last_draw=? WHERE user_id=?", (rew, datetime.now().isoformat(), m.from_user.id))
         await db.commit()
         await m.answer_photo(f_id, caption=cap)
 
-@dp.message(Command("inventory") | F.text.lower().contains("инвент"))
+# ИСПРАВЛЕНИЕ: Разделяем фильтры на два декоратора
+@dp.message(Command("inventory"))
+@dp.message(F.text.lower().contains("инвент"))
 async def inv_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT c.name, c.rarity, i.count FROM inventory i JOIN cards c ON i.card_id=c.card_id WHERE i.user_id=?", (m.from_user.id,))
@@ -127,7 +135,9 @@ async def inv_cmd(m: Message):
     if not cards: return await m.answer("Пусто!")
     await m.answer("🎒 КАРТЫ:\n" + "\n".join([f"{r}⭐ {n} x{c}" for n,r,c in cards]))
 
-@dp.message(Command("top") | F.text.lower().contains("топ"))
+# ИСПРАВЛЕНИЕ: Разделяем фильтры на два декоратора
+@dp.message(Command("top"))
+@dp.message(F.text.lower().contains("топ"))
 async def top_menu(m: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="💰 Монеты", callback_data="top_money"),
@@ -159,6 +169,7 @@ async def list_ids(m: Message):
         cards = await res.fetchall()
     await m.answer("🆔 ID КАРТ:\n" + "\n".join([f"<code>{c[0]}</code> | {c[1]} ({c[2]}⭐)" for c in cards]), parse_mode=ParseMode.HTML)
 
+# ИСПРАВЛЕНИЕ: F.caption может быть None, Aiogram с этим справляется сам. 
 @dp.message(F.photo & F.caption.startswith("/add_card"))
 async def admin_add_card(m: Message):
     if m.from_user.id != ADMIN_ID: return
@@ -179,3 +190,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+        
