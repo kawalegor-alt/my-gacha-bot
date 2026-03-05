@@ -6,7 +6,7 @@ from aiogram.types import Message, BotCommand, CallbackQuery, InlineKeyboardMark
 from aiogram.enums import ParseMode
 
 # --- КОНФИГУРАЦИЯ ---
-TOKEN = "ТВОЙ_ТОКЕН" 
+TOKEN = "8666119275:AAEBl4VeUTKGzj-WVrrb8asakNfgIqlqOQA" 
 ADMIN_ID = 1548461377 
 DB_PATH = "gacha_bot.db"
 
@@ -76,7 +76,8 @@ async def profile_cmd(m: Message):
             f"🎴 Карт в коллекции: {inv_cnt}\n"
             f"🔄 До гаранта (5⭐): {50 - u[5]}")
     await m.answer(text, parse_mode=ParseMode.HTML)
-    REWARDS = {1:{"n":100,"d":50}, 2:{"n":150,"d":75}, 3:{"n":250,"d":100}, 4:{"n":500,"d":250}, 5:{"n":1000,"d":700}}
+
+REWARDS = {1:{"n":100,"d":50}, 2:{"n":150,"d":75}, 3:{"n":250,"d":100}, 4:{"n":500,"d":250}, 5:{"n":1000,"d":700}}
 
 # --- ГАЧА МЕХАНИКА ---
 @dp.message(Command("draw"))
