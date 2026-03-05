@@ -15,7 +15,7 @@ dp = Dispatcher()
 
 async def set_commands(bot: Bot):
     cmds = [
-        BotCommand(command="start", description="🏠 Старт и очистка кнопок"),
+        BotCommand(command="start", description="🏠 Старт"),
         BotCommand(command="profile", description="👤 Профиль"),
         BotCommand(command="draw", description="🃏 Получить карту"),
         BotCommand(command="inventory", description="🎒 Инвентарь"),
@@ -33,8 +33,6 @@ async def init_db():
             user_id INTEGER PRIMARY KEY, nickname TEXT, rank TEXT DEFAULT 'Бронза',
             money INTEGER DEFAULT 0, bbc_money INTEGER DEFAULT 0, last_draw TEXT, 
             titles TEXT DEFAULT 'Новичок', unlocked_titles TEXT DEFAULT 'Новичок')''')
-        try: await db.execute("ALTER TABLE users ADD COLUMN bbc_money INTEGER DEFAULT 0")
-        except: pass
         await db.execute('''CREATE TABLE IF NOT EXISTS cards (
             card_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, rarity INTEGER, file_id TEXT)''')
         await db.execute('''CREATE TABLE IF NOT EXISTS inventory (
@@ -45,7 +43,7 @@ async def init_db():
 
 def get_rarity(rank, titles):
     r = random.uniform(0, 100)
-    bonus = 2 if "главный кисер" in titles else 0
+    bonus = 2 if titles and "главный кисер" in titles else 0
     if rank == "Мифрил":
         if r <= (15 + bonus): return 5
         if r <= 35: return 4
@@ -58,25 +56,24 @@ def get_rarity(rank, titles):
 
 REWARDS = {1:{"n":100,"d":50}, 2:{"n":150,"d":75}, 3:{"n":250,"d":100}, 4:{"n":500,"d":250}, 5:{"n":1000,"d":700}}
 
-# --- ОСНОВНЫЕ ОБРАБОТЧИКИ ---
+# --- ОБРАБОТЧИКИ ---
 
 @dp.message(Command("start"))
 async def start_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
-        user_rank = "Мифрил" if m.from_user.id == ADMIN_ID else "Бронза"
+        rank = "Мифрил" if m.from_user.id == ADMIN_ID else "Бронза"
         title = "главный кисер" if m.from_user.id == ADMIN_ID else "Новичок"
         await db.execute("INSERT OR IGNORE INTO users (user_id, nickname, rank, titles, unlocked_titles) VALUES (?,?,?,?,?)", 
-                         (m.from_user.id, m.from_user.first_name, user_rank, title, title))
+                         (m.from_user.id, m.from_user.first_name, rank, title, title))
         await db.commit()
-    await m.answer("✅ Бот готов! Старые кнопки удалены. Пиши 'карта' или используй меню.", 
-                   reply_markup=ReplyKeyboardRemove())
+    await m.answer("✅ Готово! Пиши 'карта' или используй меню.", reply_markup=ReplyKeyboardRemove())
 
-@dp.message(Command("profile") | F.text.lower().contains("профиль") | F.text.lower().contains("стата"))
+@dp.message(Command("profile") | F.text.lower().contains("профиль"))
 async def profile_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT nickname, rank, money, bbc_money, titles FROM users WHERE user_id = ?", (m.from_user.id,))
         u = await res.fetchone()
-        if not u: return await m.answer("Сначала напиши /start")
+        if not u: return await m.answer("Напиши /start")
         res = await db.execute("SELECT COUNT(*) FROM inventory WHERE user_id = ?", (m.from_user.id,))
         inv_cnt = (await res.fetchone())[0]
     await m.answer(f"<b>👤 Игрок:</b> {u[0]}\n🏅 <b>Ранг:</b> {u[1]}\n🏷 <b>Титул:</b> {u[4]}\n💰 <b>Монеты:</b> {u[2]}\n💎 <b>BBC:</b> {u[3]}\n🎴 <b>Карт:</b> {inv_cnt}", parse_mode=ParseMode.HTML)
@@ -86,9 +83,12 @@ async def draw_card(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT rank, last_draw, titles FROM users WHERE user_id = ?", (m.from_user.id,))
         row = await res.fetchone()
+        
         if not row:
-            user_rank = "Мифрил" if m.from_user.id == ADMIN_ID else "Бронза"
-            await db.execute("INSERT OR IGNORE INTO users (user_id, nickname, rank) VALUES (?,?,?)", (m.from_user.id, m.from_user.first_name, user_rank))
+            rank = "Мифрил" if m.from_user.id == ADMIN_ID else "Бронза"
+            title = "главный кисер" if m.from_user.id == ADMIN_ID else "Новичок"
+            await db.execute("INSERT OR IGNORE INTO users (user_id, nickname, rank, titles, unlocked_titles) VALUES (?,?,?,?,?)", 
+                             (m.from_user.id, m.from_user.first_name, rank, title, title))
             await db.commit()
             res = await db.execute("SELECT rank, last_draw, titles FROM users WHERE user_id = ?", (m.from_user.id,))
             row = await res.fetchone()
@@ -101,7 +101,7 @@ async def draw_card(m: Message):
         rarity = get_rarity(rank, titles)
         res = await db.execute("SELECT card_id, name, file_id FROM cards WHERE rarity = ? ORDER BY RANDOM() LIMIT 1", (rarity,))
         card = await res.fetchone()
-        if not card: return await m.answer(f"⚠️ В базе нет карт {rarity}⭐. Добавь их через /add_card")
+        if not card: return await m.answer(f"⚠️ Нет карт {rarity}⭐. Добавь через /add_card")
         
         c_id, c_name, f_id = card
         res = await db.execute("SELECT count FROM inventory WHERE user_id = ? AND card_id = ?", (m.from_user.id, c_id))
@@ -119,13 +119,13 @@ async def draw_card(m: Message):
         await db.commit()
         await m.answer_photo(f_id, caption=cap)
 
-@dp.message(Command("inventory") | F.text.lower().contains("инвент") | F.text.lower().contains("рюкзак"))
+@dp.message(Command("inventory") | F.text.lower().contains("инвент"))
 async def inv_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT c.name, c.rarity, i.count FROM inventory i JOIN cards c ON i.card_id=c.card_id WHERE i.user_id=?", (m.from_user.id,))
         cards = await res.fetchall()
-    if not cards: return await m.answer("У тебя пока нет карт!")
-    await m.answer("🎒 ТВОИ КАРТЫ:\n" + "\n".join([f"{r}⭐ {n} x{c}" for n,r,c in cards]))
+    if not cards: return await m.answer("Пусто!")
+    await m.answer("🎒 КАРТЫ:\n" + "\n".join([f"{r}⭐ {n} x{c}" for n,r,c in cards]))
 
 @dp.message(Command("top") | F.text.lower().contains("топ"))
 async def top_menu(m: Message):
@@ -146,34 +146,10 @@ async def top_callback(c: CallbackQuery):
     try: await c.message.edit_text(text, parse_mode=ParseMode.HTML)
     except: await c.answer()
 
-@dp.message(Command("help") | F.text.lower().contains("помощь"))
-async def help_cmd(m: Message):
-    await m.answer("Напиши 'карта' чтобы тянуть, 'профиль' для статистики или 'инвентарь' для списка твоих карт.")
-
-@dp.message(Command("promo"))
-async def use_promo(m: Message):
-    args = m.text.split()
-    if len(args) < 2: return await m.answer("⚠️ Введи: /promo КОД")
-    async with aiosqlite.connect(DB_PATH) as db:
-        res = await db.execute("SELECT reward_type, reward_val, uses_left, expires_at FROM promocodes WHERE code=?", (args[1],))
-        p = await res.fetchone()
-        if not p or p[2] <= 0 or datetime.fromisoformat(p[3]) < datetime.now():
-            return await m.answer("❌ Код недействителен.")
-        if p[0] == "cash": await db.execute("UPDATE users SET money=money+? WHERE user_id=?", (p[1], m.from_user.id))
-        elif p[0] == "bbc": await db.execute("UPDATE users SET bbc_money=bbc_money+? WHERE user_id=?", (p[1], m.from_user.id))
-        elif p[0] == "card":
-            await db.execute("INSERT OR IGNORE INTO inventory (user_id, card_id, count) VALUES (?,?,0)", (m.from_user.id, p[1]))
-            await db.execute("UPDATE inventory SET count = count + 1 WHERE user_id = ? AND card_id = ?", (m.from_user.id, p[1]))
-        await db.execute("UPDATE promocodes SET uses_left = uses_left - 1 WHERE code=?", (args[1],))
-        await db.commit()
-        await m.answer(f"✅ Успешно активировано!")
-
-# --- АДМИН-КОМАНДЫ ---
-
 @dp.message(Command("adminhelp"))
 async def admin_help_cmd(m: Message):
-    if m.from_user.id != ADMIN_ID: return
-    await m.answer("🛠 <b>АДМИН</b>\n/id_cards — ID всех карт\n/add_card Имя Редкость (под фото)\n/create_promo Код Тип Сумма Лимит Дни", parse_mode=ParseMode.HTML)
+    if m.from_user.id == ADMIN_ID:
+        await m.answer("🛠 <b>АДМИН</b>\n/id_cards — ID карт\n/add_card Имя Редкость (под фото)\n/create_promo Код Тип Сумма Лимит Дни", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("id_cards"))
 async def list_ids(m: Message):
@@ -181,32 +157,19 @@ async def list_ids(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT card_id, name, rarity FROM cards")
         cards = await res.fetchall()
-    if not cards: return await m.answer("Пусто.")
     await m.answer("🆔 ID КАРТ:\n" + "\n".join([f"<code>{c[0]}</code> | {c[1]} ({c[2]}⭐)" for c in cards]), parse_mode=ParseMode.HTML)
 
 @dp.message(F.photo & F.caption.startswith("/add_card"))
 async def admin_add_card(m: Message):
     if m.from_user.id != ADMIN_ID: return
     try:
-        parts = m.caption.split()
-        rarity, name = int(parts[-1]), " ".join(parts[1:-1])
+        p = m.caption.split()
+        rarity, name = int(p[-1]), " ".join(p[1:-1])
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("INSERT INTO cards (name, rarity, file_id) VALUES (?,?,?)", (name, rarity, m.photo[-1].file_id))
             await db.commit()
-        await m.answer(f"✅ Добавлена: {name} ({rarity}⭐)")
+        await m.answer(f"✅ Добавлена: {name}")
     except: await m.answer("❌ Формат: /add_card Имя 5")
-
-@dp.message(Command("create_promo"))
-async def admin_promo(m: Message):
-    if m.from_user.id != ADMIN_ID: return
-    try:
-        _, code, r_type, val, limit, days = m.text.split()
-        exp = (datetime.now() + timedelta(days=int(days))).isoformat()
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("INSERT INTO promocodes VALUES (?,?,?,?,?)", (code, r_type, int(val), int(limit), exp))
-            await db.commit()
-        await m.answer(f"✅ Код {code} создан!")
-    except: await m.answer("❌ Ошибка в формате.")
 
 async def main():
     await init_db()
@@ -216,4 +179,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-        
