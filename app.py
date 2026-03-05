@@ -4,36 +4,243 @@ import random
 import os
 import aiosqlite
 from datetime import datetime, timedelta
+from typing import Optional
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, BotCommand
+from aiogram.enums import ParseMode
 
-# --- НАСТРОЙКИ ---
-# Твой токен. На Railway лучше добавить его в Variables как BOT_TOKEN
-TOKEN = "8666119275:AAEBl4VeUTKGzj-WVrrb8asakNfgIqlqOQA"
+TOKEN = os.getenv("BOT_TOKEN", "ТВОЙ_ТОКЕН")
 ADMIN_ID = 1548461377 
-# Путь к базе данных в защищенном хранилище Railway
-DB_PATH = "/app/data/gacha_bot.db"
+DB_PATH = os.getenv("DB_PATH", "gacha_bot.db")
 
 logging.basicConfig(level=logging.INFO)
 dp = Dispatcher()
 
-# --- БАЗА ДАННЫХ ---
-async def init_db():
-    # Создаем папку, если её нет (важно для Railway Volume)
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute('''CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY, nickname TEXT, rank TEXT DEFAULT 'Бронза',
-            money INTEGER DEFAULT 0, admin_money INTEGER DEFAULT 0,
-            last_draw TEXT, titles TEXT DEFAULT 'Новичок')''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS cards (
-            card_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, rarity INTEGER, file_id TEXT)''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS inventory (
-            user_id INTEGER, card_id INTEGER, count INTEGER DEFAULT 1, PRIMARY KEY (user_id, card_id))''')
-        await db.commit()
+# --- КЛАВИАТУРЫ ---
+main_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🃏 Вытянуть карту"), KeyboardButton(text="👤 Мой профиль")],
+        [KeyboardButton(text="❓ Помощь")]
+    ],
+    resize_keyboard=True,
+    input_field_placeholder="Выбери действие ниже..."
+)
 
+# --- МЕНЮ КОМАНД (для кнопки "/") ---
+async def setup_bot_commands(bot: Bot):
+    commands = [
+        BotCommand(command="start", description="Перезапустить бота / Профиль"),
+        BotCommand(command="profile", description="Посмотреть свой профиль"),
+        BotCommand(command="help", description="Как играть?"),
+    ]
+    await bot.set_my_commands(commands)
+
+# --- СЛОЙ РАБОТЫ С ДАННЫМИ ---
+class Database:
+    def __init__(self, path):
+        self.path = path
+        self.db: Optional[aiosqlite.Connection] = None
+
+    async def connect(self):
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        self.db = await aiosqlite.connect(self.path)
+        await self.db.execute("PRAGMA foreign_keys = ON")
+        await self.db.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY, nickname TEXT, rank TEXT DEFAULT 'Бронза',
+            money INTEGER DEFAULT 0, last_draw TEXT, titles TEXT DEFAULT 'Новичок')''')
+        await self.db.execute('''CREATE TABLE IF NOT EXISTS cards (
+            card_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, rarity INTEGER, file_id TEXT)''')
+        await self.db.execute('''CREATE TABLE IF NOT EXISTS inventory (
+            user_id INTEGER, card_id INTEGER, count INTEGER DEFAULT 1, 
+            PRIMARY KEY (user_id, card_id),
+            FOREIGN KEY (card_id) REFERENCES cards(card_id))''')
+        await self.db.commit()
+
+db_manager = Database(DB_PATH)
+
+# --- ЛОГИКА ---
+def get_rarity(rank: str) -> int:
+    r = random.uniform(0, 100)
+    if rank == "Мифрил":
+        chances = [(15, 5), (35, 4), (60, 3), (90, 2), (100, 1)]
+    else:
+        bonus = 5 if rank == "Серебро" else 0
+        chances = [(1 + bonus * 0.25, 5), (4 + bonus * 0.5, 4), (10 + bonus * 1.0, 3), (30 + bonus * 1.5, 2), (100, 1)]
+    for threshold, rarity in chances:
+        if r <= threshold: return rarity
+    return 1
+
+# --- ХЕНДЛЕРЫ ---
+@dp.message(Command("start"))
+async def start(m: Message, bot: Bot):
+    user_rank = "Мифрил" if m.from_user.id == ADMIN_ID else "Бронза"
+    await db_manager.db.execute(
+        "INSERT OR IGNORE INTO users (user_id, nickname, rank) VALUES (?, ?, ?)", 
+        (m.from_user.id, m.from_user.first_name, user_rank)
+    )
+    await db_manager.db.commit()
+    # Сразу показываем профиль вместо скучного текста
+    await profile(m, bot)
+
+@dp.message(F.text == "👤 Мой профиль")
+@dp.message(Command("profile"))
+async def profile(m: Message, bot: Bot):
+    async with db_manager.db.execute(
+        "SELECT nickname, rank, money, titles FROM users WHERE user_id = ?", (m.from_user.id,)
+    ) as cursor:
+        u = await cursor.fetchone()
+    
+    if not u:
+        return await m.answer("Напиши /start для регистрации!")
+
+    async with db_manager.db.execute(
+        "SELECT COUNT(*) FROM inventory WHERE user_id = ?", (m.from_user.id,)
+    ) as cursor:
+        inv_cnt = (await cursor.fetchone())[0]
+        
+    async with db_manager.db.execute("SELECT COUNT(*) FROM cards") as cursor:
+        total = (await cursor.fetchone())[0]
+    
+    # Красивое форматирование профиля
+    text = (
+        f"💠 <b>ПРОФИЛЬ ИГРОКА</b> 💠\n\n"
+        f"👤 <b>Имя:</b> {u[0]}\n"
+        f"🏷 <b>Титул:</b> <i>{u[3]}</i>\n"
+        f"🏅 <b>Ранг:</b> <b>{u[1]}</b>\n"
+        f"💰 <b>Баланс:</b> {u[2]} монет\n\n"
+        f"🎴 <b>Коллекция карт:</b> {inv_cnt} из {total}\n"
+        f"<i>Собери их все, чтобы стать легендой!</i>"
+    )
+
+    # Пытаемся получить аватарку пользователя
+    user_photos = await bot.get_user_profile_photos(m.from_user.id)
+    if user_photos.total_count > 0:
+        # Берем фото лучшего качества (последнее в массиве первой фотографии)
+        photo_id = user_photos.photos[0][-1].file_id
+        await m.answer_photo(photo=photo_id, caption=text, parse_mode=ParseMode.HTML, reply_markup=main_kb)
+    else:
+        # Если у пользователя нет аватарки или она скрыта настройками приватности
+        await m.answer(text, parse_mode=ParseMode.HTML, reply_markup=main_kb)
+
+@dp.message(F.text.in_(["🃏 Вытянуть карту", "карта", "карту"]))
+async def draw(m: Message):
+    async with db_manager.db.execute(
+        "SELECT rank, last_draw FROM users WHERE user_id = ?", (m.from_user.id,)
+    ) as cursor:
+        u = await cursor.fetchone()
+    
+    if not u: return
+    rank, last_draw = u
+    cd = timedelta(hours=24) if rank != "Мифрил" else timedelta(seconds=5)
+    now = datetime.now()
+    
+    if last_draw:
+        time_passed = now - datetime.fromisoformat(last_draw)
+        if time_passed < cd:
+            rem = cd - time_passed
+            hours, remainder = divmod(rem.seconds, 3600)
+            minutes, seconds = divmod(remainder, 60)
+            return await m.answer(f"⏳ <b>Кулдаун!</b>\nВозвращайся через: <code>{hours}ч {minutes}м {seconds}с</code>", parse_mode=ParseMode.HTML)
+    
+    rarity = get_rarity(rank)
+    async with db_manager.db.execute("SELECT card_id, name, file_id FROM cards WHERE rarity = ? ORDER BY RANDOM() LIMIT 1", (rarity,)) as cursor:
+        card = await cursor.fetchone()
+    
+    if not card: 
+        return await m.answer(f"😔 Карт редкости {rarity}⭐ пока нет в базе! Пни админа.")
+    
+    c_id, c_name, f_id = card
+    async with db_manager.db.execute("SELECT count FROM inventory WHERE user_id = ? AND card_id = ?", (m.from_user.id, c_id)) as cursor:
+        is_duplicate = await cursor.fetchone()
+
+    if is_duplicate:
+        bonus = rarity * 20
+        await db_manager.db.execute("UPDATE users SET money = money + ? WHERE user_id = ?", (bonus, m.from_user.id))
+        cap = f"🃏 <b>Повторка!</b>\n\nТы вытянул: <b>{c_name}</b> ({rarity}⭐)\nОна у тебя уже есть, поэтому ты получаешь компенсацию:\n💰 <b>+{bonus} монет</b>"
+    else:
+        await db_manager.db.execute("INSERT INTO inventory (user_id, card_id) VALUES (?, ?)", (m.from_user.id, c_id))
+        cap = f"🎉 <b>НОВАЯ КАРТА!</b> 🎉\n\nТы успешно вытянул: <b>{c_name}</b> ({rarity}⭐)\nОна добавлена в твою коллекцию!"
+    
+    await db_manager.db.execute("UPDATE users SET last_draw = ? WHERE user_id = ?", (now.isoformat(), m.from_user.id))
+    await db_manager.db.commit()
+    await m.answer_photo(f_id, caption=cap, parse_mode=ParseMode.HTML, reply_markup=main_kb)
+
+@dp.message(F.text == "❓ Помощь")
+@dp.message(Command("help"))
+async def bot_help(m: Message):
+    text = (
+        "📖 <b>Справочник по игре:</b>\n\n"
+        "🃏 <b>Как играть?</b>\n"
+        "Раз в день (или чаще, зависит от ранга) ты можешь тянуть случайную карту. Твоя цель — собрать всю коллекцию!\n\n"
+        "🏆 <b>Редкость карт:</b>\n"
+        "1⭐ — Обычная\n"
+        "2⭐ — Редкая\n"
+        "3⭐ — Эпическая\n"
+        "4⭐ — Мифическая\n"
+        "5⭐ — Легендарная\n\n"
+        "💰 <b>Монеты:</b> Даются за выпадение повторяющихся карт. В будущем их можно будет тратить на покупку титулов или обмен!\n\n"
+        "<i>Используй кнопки внизу экрана для управления.</i>"
+    )
+    await m.answer(text, parse_mode=ParseMode.HTML, reply_markup=main_kb)
+
+@dp.message(Command("adminhelp"))
+async def admin_help(m: Message):
+    if m.from_user.id != ADMIN_ID:
+        return await m.answer("⛔️ Эта команда доступна только администратору.")
+    
+    text = (
+        "🛠 <b>ПАНЕЛЬ АДМИНИСТРАТОРА</b> 🛠\n\n"
+        "<b>Как добавить новую карту?</b>\n"
+        "1. Отправь картинку (фото) боту.\n"
+        "2. В поле «Подпись» (Caption) напиши команду в формате:\n"
+        "<code>/add_card Название карты 5</code>\n"
+        "<i>(Где 5 — это редкость от 1 до 5)</i>\n\n"
+        "<b>Пример:</b>\n"
+        "<code>/add_card Огненный Дракон 4</code>\n\n"
+        "<b>Особенности админа:</b>\n"
+        "- У тебя ранг «Мифрил»\n"
+        "- Кулдаун на карты всего 5 секунд\n"
+        "- Повышенный шанс на Легендарки"
+    )
+    await m.answer(text, parse_mode=ParseMode.HTML)
+
+@dp.message(F.photo)
+async def add_card_photo(m: Message):
+    if m.from_user.id != ADMIN_ID or not m.caption or not m.caption.startswith("/add_card"):
+        return
+    
+    try:
+        parts = m.caption.split()
+        rarity = int(parts[-1])
+        name = " ".join(parts[1:-1])
+        
+        await db_manager.db.execute(
+            "INSERT INTO cards (name, rarity, file_id) VALUES (?, ?, ?)", 
+            (name, rarity, m.photo[-1].file_id)
+        )
+        await db_manager.db.commit()
+        await m.answer(f"✅ Успешно добавлено!\n<b>Имя:</b> {name}\n<b>Редкость:</b> {rarity}⭐", parse_mode=ParseMode.HTML)
+    except (ValueError, IndexError):
+        await m.answer("❌ <b>Ошибка формата!</b>\nИспользуй: <code>/add_card Название 5</code> в подписи к фото.", parse_mode=ParseMode.HTML)
+
+# --- ЗАПУСК ---
+async def main():
+    await db_manager.connect()
+    bot = Bot(token=TOKEN)
+    await setup_bot_commands(bot) # Устанавливаем меню команд
+    print("Бот запущен!")
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await db_manager.db.close()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
 # --- ЛОГИКА ШАНСОВ ---
 def get_rarity(rank):
     r = random.uniform(0, 100)
