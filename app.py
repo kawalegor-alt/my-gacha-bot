@@ -33,6 +33,7 @@ async def set_commands(bot: Bot):
     commands = [
         BotCommand(command="start", description="🏠 Старт"),
         BotCommand(command="promo", description="🎁 Промокод"),
+        BotCommand(command="id_cards", description="🆔 Список ID карт"),
         BotCommand(command="adminhelp", description="🛠 Админ")
     ]
     await bot.set_my_commands(commands)
@@ -46,7 +47,6 @@ async def init_db():
             money INTEGER DEFAULT 0, bbc_money INTEGER DEFAULT 0, last_draw TEXT, 
             titles TEXT DEFAULT 'Новичок', unlocked_titles TEXT DEFAULT 'Новичок')''')
         
-        # Проверка колонок для старых БД
         try: await db.execute("ALTER TABLE users ADD COLUMN bbc_money INTEGER DEFAULT 0")
         except: pass
         
@@ -58,7 +58,7 @@ async def init_db():
             code TEXT PRIMARY KEY, reward_type TEXT, reward_val INTEGER, uses_left INTEGER, expires_at TEXT)''')
         await db.commit()
 
-# --- ШАНСЫ ---
+# --- ЛОГИКА ШАНСОВ ---
 def get_rarity(rank, titles):
     r = random.uniform(0, 100)
     bonus = 2 if "главный кисер" in titles else 0
@@ -73,6 +73,9 @@ def get_rarity(rank, titles):
     return 2 if r <= 40 else 1
 
 REWARDS = {1:{"n":100,"d":50}, 2:{"n":150,"d":75}, 3:{"n":250,"d":100}, 4:{"n":500,"d":250}, 5:{"n":1000,"d":700}}
+
+# --- ОБРАБОТЧИКИ ---
+
 @dp.message(Command("start"))
 async def start_cmd(m: Message, bot: Bot):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -88,6 +91,7 @@ async def profile_cmd(m: Message, bot: Bot):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT nickname, rank, money, bbc_money, titles FROM users WHERE user_id = ?", (m.from_user.id,))
         u = await res.fetchone()
+        if not u: return
         res = await db.execute("SELECT COUNT(*) FROM inventory WHERE user_id = ?", (m.from_user.id,))
         inv_cnt = (await res.fetchone())[0]
     
@@ -99,7 +103,8 @@ async def profile_cmd(m: Message, bot: Bot):
 async def draw_card(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT rank, last_draw, titles FROM users WHERE user_id = ?", (m.from_user.id,))
-        rank, last_draw, titles = await res.fetchone()
+        row = await res.fetchone()
+        rank, last_draw, titles = row
         cd = timedelta(seconds=10) if rank == "Мифрил" else timedelta(hours=24)
         if last_draw and datetime.now() < datetime.fromisoformat(last_draw) + cd:
             return await m.answer("⏳ Еще не время!")
@@ -107,7 +112,7 @@ async def draw_card(m: Message):
         rarity = get_rarity(rank, titles)
         res = await db.execute("SELECT card_id, name, file_id FROM cards WHERE rarity = ? ORDER BY RANDOM() LIMIT 1", (rarity,))
         card = await res.fetchone()
-        if not card: return await m.answer("⚠️ Карт этой редкости нет в базе.")
+        if not card: return await m.answer("⚠️ Карт такой редкости нет в базе.")
         
         c_id, c_name, f_id = card
         res = await db.execute("SELECT count FROM inventory WHERE user_id = ? AND card_id = ?", (m.from_user.id, c_id))
@@ -118,18 +123,19 @@ async def draw_card(m: Message):
             await db.execute("UPDATE inventory SET count = count + 1 WHERE user_id = ? AND card_id = ?", (m.from_user.id, c_id))
             cap = f"♻️ ПОВТОРКА: {c_name} ({rarity}⭐)\n💰 +{rew}"
         else:
-            await db.execute("INSERT INTO inventory (user_id, card_id) VALUES (?,?)", (m.from_user.id, c_id))
+            await db.execute("INSERT INTO inventory (user_id, card_id, count) VALUES (?,?,1)", (m.from_user.id, c_id))
             cap = f"🎉 НОВАЯ: {c_name} ({rarity}⭐)\n💰 +{rew}"
         
         await db.execute("UPDATE users SET money=money+?, last_draw=? WHERE user_id=?", (rew, datetime.now().isoformat(), m.from_user.id))
         await db.commit()
         await m.answer_photo(f_id, caption=cap)
-        @dp.message(F.text == "🏆 Топ")
-async def top_menu(m:Message):
+
+@dp.message(F.text == "🏆 Топ")
+async def top_menu(m: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💰 Монеты", callback_data="top_money"), InlineKeyboardButton(text="💎 BBC", callback_data="top_bbc")]
     ])
-    await m.answer("🏆 Выбери категорию:", reply_markup=kb)
+    await m.answer("🏆 Лидеры:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("top_"))
 async def top_callback(c: CallbackQuery):
@@ -138,42 +144,50 @@ async def top_callback(c: CallbackQuery):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute(f"SELECT nickname, {col} FROM users ORDER BY {col} DESC LIMIT 10")
         data = await res.fetchall()
-    
     text = f"🏆 ТОП {cat.upper()}:\n" + "\n".join([f"{i+1}. {n} — {v}" for i,(n,v) in enumerate(data)])
-    try:
-        await c.message.edit_text(text, parse_mode=ParseMode.HTML)
-    except TelegramBadRequest:
-        await c.answer()
+    try: await c.message.edit_text(text, parse_mode=ParseMode.HTML)
+    except: await c.answer()
+
+@dp.message(Command("id_cards"))
+async def list_ids(m: Message):
+    if m.from_user.id != ADMIN_ID: return
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute("SELECT card_id, name, rarity FROM cards")
+        cards = await res.fetchall()
+    text = "🆔 ID КАРТ:\n" + "\n".join([f"<code>{c[0]}</code> | {c[1]} ({c[2]}⭐)" for c in cards])
+    await m.answer(text, parse_mode=ParseMode.HTML)
 
 @dp.message(Command("promo"))
 async def use_promo(m: Message):
-    code = m.text.split()[1] if len(m.text.split()) > 1 else ""
-    if not code: return await m.answer("⚠️ Введи: /promo КОД")
+    args = m.text.split()
+    if len(args) < 2: return await m.answer("⚠️ Введи: /promo КОД")
     async with aiosqlite.connect(DB_PATH) as db:
-        res = await db.execute("SELECT reward_type, reward_val, uses_left, expires_at FROM promocodes WHERE code=?", (code,))
+        res = await db.execute("SELECT reward_type, reward_val, uses_left, expires_at FROM promocodes WHERE code=?", (args[1],))
         p = await res.fetchone()
         if not p or p[2] <= 0 or datetime.fromisoformat(p[3]) < datetime.now():
-            return await m.answer("❌ Код не работает.")
+            return await m.answer("❌ Код недействителен.")
         
         if p[0] == "cash": await db.execute("UPDATE users SET money=money+? WHERE user_id=?", (p[1], m.from_user.id))
         elif p[0] == "bbc": await db.execute("UPDATE users SET bbc_money=bbc_money+? WHERE user_id=?", (p[1], m.from_user.id))
+        elif p[0] == "card":
+            await db.execute("INSERT OR IGNORE INTO inventory (user_id, card_id, count) VALUES (?,?,0)", (m.from_user.id, p[1]))
+            await db.execute("UPDATE inventory SET count = count + 1 WHERE user_id = ? AND card_id = ?", (m.from_user.id, p[1]))
         
-        await db.execute("UPDATE promocodes SET uses_left = uses_left - 1 WHERE code=?", (code,))
+        await db.execute("UPDATE promocodes SET uses_left = uses_left - 1 WHERE code=?", (args[1],))
         await db.commit()
-        await m.answer(f"✅ Получено: {p[1]} {p[0]}")
+        await m.answer(f"✅ Успешно!")
 
 @dp.message(F.photo & F.caption.startswith("/add_card"))
 async def admin_add_card(m: Message):
     if m.from_user.id != ADMIN_ID: return
     try:
         parts = m.caption.split()
-        rarity = int(parts[-1])
-        name = " ".join(parts[1:-1])
+        rarity, name = int(parts[-1]), " ".join(parts[1:-1])
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("INSERT INTO cards (name, rarity, file_id) VALUES (?,?,?)", (name, rarity, m.photo[-1].file_id))
             await db.commit()
         await m.answer(f"✅ Карта {name} добавлена!")
-    except: await m.answer("❌ Ошибка. Формат: /add_card Имя 5")
+    except: await m.answer("❌ Формат: /add_card Имя 5")
 
 @dp.message(Command("create_promo"))
 async def admin_promo(m: Message):
@@ -184,8 +198,8 @@ async def admin_promo(m: Message):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("INSERT INTO promocodes VALUES (?,?,?,?,?)", (code, r_type, int(val), int(limit), exp))
             await db.commit()
-        await m.answer(f"✅ Промо {code} создан!")
-    except: await m.answer("❌ Ошибка. Пример: /create_promo GIFT bbc 100 50 7")
+        await m.answer(f"✅ Промокод {code} создан!")
+    except: await m.answer("❌ Ошибка. Пример: /create_promo GIFT card 1 50 7")
 
 @dp.message(F.text == "🎒 Инвентарь")
 async def inv_cmd(m: Message):
@@ -193,7 +207,12 @@ async def inv_cmd(m: Message):
         res = await db.execute("SELECT c.name, c.rarity, i.count FROM inventory i JOIN cards c ON i.card_id=c.card_id WHERE i.user_id=?", (m.from_user.id,))
         cards = await res.fetchall()
     if not cards: return await m.answer("Пусто!")
-    await m.answer("🎒 ТВОИ КАРТЫ:\n" + "\n".join([f"{r}⭐ {n} x{c}" for n,r,c in cards]))
+    text = "🎒 ТВОИ КАРТЫ:\n" + "\n".join([f"{r}⭐ {n} x{c}" for n,r,c in cards])
+    await m.answer(text)
+
+@dp.message(F.text == "❓ Помощь")
+async def help_cmd(m: Message):
+    await m.answer("📖 Тяни карты раз в день, копи монеты за повторки и вводи промокоды!")
 
 async def main():
     await init_db()
@@ -203,4 +222,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-        
