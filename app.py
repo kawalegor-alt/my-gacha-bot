@@ -256,10 +256,11 @@ async def coinflip_cmd(m: Message):
             await db.execute("UPDATE users SET money = money - ? WHERE user_id = ?", (bet, m.from_user.id))
             await m.answer(f"🪙 Выпал {result}. Ты проиграл {bet} монет.")
         await db.commit()
-    @dp.message(Command("dice"))
+@dp.message(Command("dice"))
 async def dice_cmd(m: Message):
     args = (m.text or "").split()
-    if len(args) < 2 or not args[1].isdigit(): return await m.answer("🎲 Формат: /dice [ставка]")
+    if len(args) < 2 or not args[1].isdigit(): 
+        return await m.answer("🎲 Формат: /dice [ставка]")
     bet = int(args[1])
 
     if not await check_balance_and_ban(m.from_user.id, bet): return await m.answer("❌ Недостаточно монет или вы в бане!")
