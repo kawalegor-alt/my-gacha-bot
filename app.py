@@ -26,6 +26,9 @@ class AdminStates(StatesGroup):
     waiting_for_ban = State()
     waiting_for_unban = State()
     waiting_for_user_info = State()
+    waiting_for_take_money = State()
+    waiting_for_wipe_account = State()
+    waiting_for_del_promo = State()
 
 class ShopStates(StatesGroup):
     waiting_for_title = State()
@@ -57,7 +60,8 @@ async def set_commands(bot: Bot):
         BotCommand(command="top", description="🏆 Лидеры"),
         BotCommand(command="shop", description="🛒 Магазин"),
         BotCommand(command="games", description="🎮 Мини-игры"),
-        BotCommand(command="promo", description="🎁 Промокод")
+        BotCommand(command="promo", description="🎁 Промокод"),
+        BotCommand(command="pay", description="💸 Перевод монет")
     ]
     await bot.set_my_commands(cmds)
 
@@ -80,7 +84,7 @@ async def profile_cmd(m: Message, bot: Bot):
         res = await db.execute("SELECT SUM(count) FROM inventory WHERE user_id = ?", (m.from_user.id,))
         inv_cnt = (await res.fetchone())[0] or 0
     
-    text = (f"<b>🪪 ПРОФИЛЬ:</b> {u[0]}\n\n🏅 Ранг: {u[1]}\n🏆 Титул: {u[4]}\n"
+    text = (f"<b>🪪 ПРОФИЛЬ:</b> {u[0]}\n🆔 ID: <code>{m.from_user.id}</code>\n\n🏅 Ранг: {u[1]}\n🏆 Титул: {u[4]}\n"
             f"💰 Монеты: {u[2]} | 💎 BBC: {u[3]}\n🎴 Карт: {inv_cnt}\n🔄 До гаранта (5⭐): {50 - u[5]}")
 
     try:
@@ -116,7 +120,7 @@ async def top_cb(c: CallbackQuery):
     text = f"🏆 <b>{title}:</b>\n\n" + "\n".join([f"{i+1}. {u[0]} — {u[1]}{suf}" for i, u in enumerate(users)])
     await c.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=c.message.reply_markup)
     await c.answer()
-                   # --- ГАЧА ---
+    # --- ГАЧА ---
 @dp.message(F.text.lower().in_({"карта", "карту", "/draw"}))
 async def draw_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -198,7 +202,8 @@ async def inventory_cmd(m: Message):
     msg = "🎒 <b>ТВОИ КАРТЫ:</b>\n\n"
     for name, rar, count in cards[:40]: msg += f"{'⭐'*rar} {name} (x{count})\n"
     await m.answer(msg, parse_mode=ParseMode.HTML)
-    # --- МИНИ-ИГРЫ ---
+
+# --- МИНИ-ИГРЫ ---
 @dp.message(Command("games"))
 async def games_cmd(m: Message):
     text = ("🎮 <b>ДОСТУПНЫЕ МИНИ-ИГРЫ:</b>\n\n"
@@ -251,8 +256,7 @@ async def coinflip_cmd(m: Message):
             await db.execute("UPDATE users SET money = money - ? WHERE user_id = ?", (bet, m.from_user.id))
             await m.answer(f"🪙 Выпал {result}. Ты проиграл {bet} монет.")
         await db.commit()
-
-@dp.message(Command("dice"))
+        @dp.message(Command("dice"))
 async def dice_cmd(m: Message):
     args = (m.text or "").split()
     if len(args) < 2 or not args[1].isdigit(): return await m.answer("🎲 Формат: /dice [ставка]")
@@ -319,6 +323,7 @@ async def roulette_cmd(m: Message):
             await db.execute("UPDATE users SET money = money - ? WHERE user_id = ?", (bet, m.from_user.id))
             await m.answer(f"🎡 Выпало {res_num} ({res_color}). Ты проиграл {bet} монет.")
         await db.commit()
+
 # --- МАГАЗИН И ПРОМОКОДЫ ---
 @dp.message(Command("shop"))
 async def shop_cmd(m: Message):
@@ -399,7 +404,7 @@ async def shop_cb(c: CallbackQuery, state: FSMContext):
 
 @dp.message(ShopStates.waiting_for_title)
 async def process_new_title(m: Message, state: FSMContext):
-    new_title = m.text[:30] # Ограничим до 30 символов
+    new_title = m.text[:30]
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET bbc_money=bbc_money-10, titles=? WHERE user_id=?", (new_title, m.from_user.id))
         await db.commit()
@@ -409,13 +414,13 @@ async def process_new_title(m: Message, state: FSMContext):
 @dp.message(Command("promo"))
 async def promo_cmd(m: Message):
     args = (m.text or "").split()
-    if len(args) < 2: return await m.answer("🎁 /promo КОД")
+    if len(args) < 2: return await m.answer("🎁 Использование: /promo КОД")
     code = args[1]
     async with aiosqlite.connect(DB_PATH) as db:
         if await (await db.execute("SELECT 1 FROM used_promos WHERE user_id=? AND code=?", (m.from_user.id, code))).fetchone():
             return await m.answer("❌ Код уже активирован!")
         p = await (await db.execute("SELECT reward_type, reward_val, uses_left FROM promocodes WHERE code = ?", (code,))).fetchone()
-        if not p or p[2] <= 0: return await m.answer("❌ Код не найден/закончился.")
+        if not p or p[2] <= 0: return await m.answer("❌ Код не найден или закончился.")
         col = "money" if p[0] == "money" else "bbc_money"
         await db.execute(f"UPDATE users SET {col}={col}+? WHERE user_id=?", (p[1], m.from_user.id))
         await db.execute("UPDATE promocodes SET uses_left=uses_left-1 WHERE code=?", (code,))
@@ -423,14 +428,43 @@ async def promo_cmd(m: Message):
         await db.commit()
     await m.answer(f"✅ Промокод активирован! +{p[1]} {'Монет' if p[0] == 'money' else 'BBC'}")
 
+@dp.message(Command("pay"))
+async def pay_cmd(m: Message):
+    args = (m.text or "").split()
+    if len(args) < 3 or not args[1].isdigit() or not args[2].isdigit():
+        return await m.answer("💸 Формат: <code>/pay [ID_игрока] [сумма]</code>", parse_mode=ParseMode.HTML)
+    
+    target_id, amount = int(args[1]), int(args[2])
+    if amount <= 0: return await m.answer("❌ Сумма должна быть больше нуля!")
+    if target_id == m.from_user.id: return await m.answer("❌ Нельзя перевести самому себе!")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        sender = await (await db.execute("SELECT money, is_banned FROM users WHERE user_id=?", (m.from_user.id,))).fetchone()
+        if not sender or sender[1] or sender[0] < amount:
+            return await m.answer("❌ Недостаточно средств или вы в бане!")
+        
+        receiver = await (await db.execute("SELECT 1 FROM users WHERE user_id=?", (target_id,))).fetchone()
+        if not receiver:
+            return await m.answer("❌ Игрок не найден в базе данных! Убедись, что он нажимал /start")
+        
+        tax = int(amount * 0.03) # Комиссия 3%
+        final_amount = amount - tax
+
+        await db.execute("UPDATE users SET money=money-? WHERE user_id=?", (amount, m.from_user.id))
+        await db.execute("UPDATE users SET money=money+? WHERE user_id=?", (final_amount, target_id))
+        await db.commit()
+        
+    await m.answer(f"✅ Успешный перевод!\nОтправлено: {amount} 💰\nКомиссия системы (3%): {tax} 💰\nИгрок получил: {final_amount} 💰")
 # --- МЕГА-АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_cmd(m: Message):
     if m.from_user.id != ADMIN_ID: return
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats"), InlineKeyboardButton(text="🎁 Промокод", callback_data="adm_promo")],
-        [InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast"), InlineKeyboardButton(text="🔍 Профиль игрока", callback_data="adm_info")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats"), InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
+        [InlineKeyboardButton(text="🎁 Созд. Промо", callback_data="adm_promo"), InlineKeyboardButton(text="📋 Список Промо", callback_data="adm_promolist")],
+        [InlineKeyboardButton(text="❌ Удал. Промо", callback_data="adm_delpromo"), InlineKeyboardButton(text="🔍 Профиль", callback_data="adm_info")],
         [InlineKeyboardButton(text="💰 Дать монеты", callback_data="adm_give_m"), InlineKeyboardButton(text="💎 Дать BBC", callback_data="adm_give_b")],
+        [InlineKeyboardButton(text="📉 Отнять монеты", callback_data="adm_take_m"), InlineKeyboardButton(text="🗑 Обнулить акк", callback_data="adm_wipe")],
         [InlineKeyboardButton(text="🚫 Выдать Бан", callback_data="adm_ban"), InlineKeyboardButton(text="🕊 Снять Бан", callback_data="adm_unban")]
     ])
     await m.answer("👑 <b>Главная Админ-панель</b>", reply_markup=kb, parse_mode=ParseMode.HTML)
@@ -445,12 +479,30 @@ async def admin_cb(c: CallbackQuery, state: FSMContext):
             uc = (await (await db.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
             cc = (await (await db.execute("SELECT COUNT(*) FROM cards")).fetchone())[0]
         await c.message.edit_text(f"📊 <b>Статистика:</b>\n👥 Игроков: {uc}\n🃏 Карт: {cc}", parse_mode=ParseMode.HTML)
+    elif action == "promolist":
+        async with aiosqlite.connect(DB_PATH) as db:
+            promos = await (await db.execute("SELECT code, reward_type, reward_val, uses_left FROM promocodes")).fetchall()
+        if not promos:
+            await c.message.answer("📝 Нет активных промокодов.")
+        else:
+            txt = "📋 <b>Активные промокоды:</b>\n\n"
+            for p in promos: txt += f"Код: <code>{p[0]}</code> | {p[1]} | +{p[2]} | Остаток: {p[3]}\n"
+            await c.message.answer(txt, parse_mode=ParseMode.HTML)
     elif action == "promo":
         await c.message.answer("Формат: <code>[Код] [money/bbc_money] [Сумма] [Активации]</code>", parse_mode=ParseMode.HTML)
         await state.set_state(AdminStates.waiting_for_promo_data)
+    elif action == "delpromo":
+        await c.message.answer("Введите код для удаления:")
+        await state.set_state(AdminStates.waiting_for_del_promo)
     elif action == "broadcast":
         await c.message.answer("Текст рассылки:")
         await state.set_state(AdminStates.waiting_for_broadcast)
+    elif action == "take":
+        await c.message.answer(f"Формат: <code>ID СУММА</code>", parse_mode=ParseMode.HTML)
+        await state.set_state(AdminStates.waiting_for_take_money)
+    elif action == "wipe":
+        await c.message.answer("ID юзера для ПОЛНОГО ОБНУЛЕНИЯ:")
+        await state.set_state(AdminStates.waiting_for_wipe_account)
     elif action in ("give", "ban", "unban", "info"):
         t = c.data.split("_")[2] if action == "give" else None
         if action == "give": 
@@ -478,6 +530,14 @@ async def process_promo(m: Message, state: FSMContext):
     except: await m.answer("❌ Ошибка!")
     await state.clear()
 
+@dp.message(AdminStates.waiting_for_del_promo)
+async def process_del_promo(m: Message, state: FSMContext):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM promocodes WHERE code=?", (m.text,))
+        await db.commit()
+    await m.answer(f"✅ Промокод {m.text} удален из базы.")
+    await state.clear()
+
 @dp.message(AdminStates.waiting_for_broadcast)
 async def process_broadcast(m: Message, state: FSMContext, bot: Bot):
     async with aiosqlite.connect(DB_PATH) as db: users = await (await db.execute("SELECT user_id FROM users")).fetchall()
@@ -501,6 +561,30 @@ async def _process_give(m: Message, state: FSMContext, col: str):
         await db.execute(f"UPDATE users SET {col} = {col} + ? WHERE user_id = ?", (int(args[1]), int(args[0])))
         await db.commit()
     await m.answer("✅ Выдано.")
+    await state.clear()
+
+@dp.message(AdminStates.waiting_for_take_money)
+async def process_take_m(m: Message, state: FSMContext):
+    args = m.text.split()
+    if len(args) < 2 or not args[0].isdigit() or not args[1].isdigit():
+        return await m.answer("❌ Ошибка формата! Введи: ID СУММА")
+    uid, amt = int(args[0]), int(args[1])
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET money = CASE WHEN money - ? < 0 THEN 0 ELSE money - ? END WHERE user_id = ?", (amt, amt, uid))
+        await db.commit()
+    await m.answer(f"✅ Успешно списано {amt} монет у пользователя {uid}.")
+    await state.clear()
+
+@dp.message(AdminStates.waiting_for_wipe_account)
+async def process_wipe(m: Message, state: FSMContext):
+    if not m.text.isdigit(): return await m.answer("❌ ID должен быть числом.")
+    uid = int(m.text)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM users WHERE user_id=?", (uid,))
+        await db.execute("DELETE FROM inventory WHERE user_id=?", (uid,))
+        await db.execute("DELETE FROM used_promos WHERE user_id=?", (uid,))
+        await db.commit()
+    await m.answer(f"🗑 Аккаунт {uid} полностью обнулен и удален из базы.")
     await state.clear()
 
 @dp.message(AdminStates.waiting_for_ban)
@@ -544,4 +628,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-        
+            
