@@ -120,7 +120,7 @@ async def top_cb(c: CallbackQuery):
     text = f"🏆 <b>{title}:</b>\n\n" + "\n".join([f"{i+1}. {u[0]} — {u[1]}{suf}" for i, u in enumerate(users)])
     await c.message.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=c.message.reply_markup)
     await c.answer()
-    # --- ГАЧА ---
+# --- ГАЧА ---
 @dp.message(F.text.lower().in_({"карта", "карту", "/draw"}))
 async def draw_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -455,7 +455,7 @@ async def pay_cmd(m: Message):
         await db.commit()
         
     await m.answer(f"✅ Успешный перевод!\nОтправлено: {amount} 💰\nКомиссия системы (3%): {tax} 💰\nИгрок получил: {final_amount} 💰")
-# --- МЕГА-АДМИНКА ---
+                               # --- МЕГА-АДМИНКА ---
 @dp.message(Command("admin"))
 async def admin_cmd(m: Message):
     if m.from_user.id != ADMIN_ID: return
