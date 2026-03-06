@@ -4,6 +4,8 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message, BotCommand, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 # --- КОНФИГУРАЦИЯ ---
 # ВАЖНО: Никогда не свети свой токен в открытом доступе. Лучше убери его в .env файл!
@@ -31,6 +33,10 @@ REWARDS = {
     4: {"n": 500, "d": 250}, 
     5: {"n": 1000, "d": 700}
 }
+
+# Состояния для админки
+class AdminStates(StatesGroup):
+    waiting_for_promo_data = State()
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -97,7 +103,7 @@ async def profile_cmd(m: Message, bot: Bot):
     except:
         await m.answer(text, parse_mode=ParseMode.HTML)
 
-# --- ГАЧА (ВЫЗОВ СЛОВОМ И КОМАНДОЙ) ---
+# --- ГАЧА ---
 @dp.message(F.text.lower().in_({"карта", "карту", "/draw"}))
 async def draw_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -141,7 +147,7 @@ async def draw_cmd(m: Message):
                f"💰 +{rew} монет")
         await m.answer_photo(card[2], caption=cap, parse_mode=ParseMode.HTML)
 
-# --- ЭКОНОМИКА ---
+# --- ЭКОНОМИКА И МАГАЗИН ---
 
 @dp.message(Command("daily"))
 async def daily_cmd(m: Message):
@@ -169,6 +175,40 @@ async def work_cmd(m: Message):
         await db.commit()
         await m.answer(f"⚒ Ты поработал и получил {reward} монет!")
 
+@dp.message(Command("shop"))
+async def shop_cmd(m: Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏳ Сбросить КД на Гачу — 1500 💰", callback_data="shop_reset_cd")],
+        [InlineKeyboardButton(text="💎 Купить 1 BBC — 5000 💰", callback_data="shop_buy_bbc")]
+    ])
+    await m.answer("🛒 <b>МАГАЗИН</b>\nПотрать свои монеты с умом:", reply_markup=kb, parse_mode=ParseMode.HTML)
+
+@dp.callback_query(F.data.startswith("shop_"))
+async def shop_cb(c: CallbackQuery):
+    action = c.data.split("_")[1:]
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        res = await db.execute("SELECT money FROM users WHERE user_id = ?", (c.from_user.id,))
+        user_money = (await res.fetchone())[0]
+
+        if action[0] == "reset" and action[1] == "cd":
+            if user_money < 1500:
+                return await c.answer("❌ Недостаточно монет (Нужно 1500)", show_alert=True)
+            # Устанавливаем старую дату, чтобы сбросить кулдаун
+            past_date = (datetime.now() - timedelta(days=2)).isoformat()
+            await db.execute("UPDATE users SET money = money - 1500, last_draw = ? WHERE user_id = ?", (past_date, c.from_user.id))
+            await db.commit()
+            await c.message.edit_text("✅ Ты успешно сбросил кулдаун на гачу! Можешь тянуть карту.")
+            
+        elif action[0] == "buy" and action[1] == "bbc":
+            if user_money < 5000:
+                return await c.answer("❌ Недостаточно монет (Нужно 5000)", show_alert=True)
+            await db.execute("UPDATE users SET money = money - 5000, bbc_money = bbc_money + 1 WHERE user_id = ?", (c.from_user.id,))
+            await db.commit()
+            await c.message.edit_text("💎 Поздравляю! Ты купил 1 BBC.")
+            
+    await c.answer()
+
 @dp.message(Command("inventory"))
 async def inventory_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -184,7 +224,7 @@ async def inventory_cmd(m: Message):
         msg += f"{'⭐'*rar} {name} (x{count})\n"
     await m.answer(msg, parse_mode=ParseMode.HTML)
 
-# --- ОСТАЛЬНОЕ ---
+# --- ИГРЫ И ТОП ---
 
 @dp.message(Command("casino"))
 async def casino_cmd(m: Message):
@@ -224,7 +264,60 @@ async def top_cb(c: CallbackQuery):
         users = await res.fetchall()
     text = "🏆 <b>ТОП 10:</b>\n\n" + "\n".join([f"{i+1}. {u[0]} — {u[1]}" for i, u in enumerate(users)])
     await c.message.edit_text(text, parse_mode=ParseMode.HTML)
-    await c.answer()  # <--- Обязательно, чтобы кнопка не висела в загрузке!
+    await c.answer()
+
+# --- АДМИН ПАНЕЛЬ И ПРОМОКОДЫ ---
+
+@dp.message(Command("admin"))
+async def admin_cmd(m: Message):
+    if m.from_user.id != ADMIN_ID: return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Создать промокод", callback_data="admin_create_promo")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")]
+    ])
+    await m.answer("👑 <b>Админ-панель</b>\nВыбери действие:", reply_markup=kb, parse_mode=ParseMode.HTML)
+
+@dp.callback_query(F.data == "admin_stats")
+async def admin_stats_cb(c: CallbackQuery):
+    if c.from_user.id != ADMIN_ID: return
+    async with aiosqlite.connect(DB_PATH) as db:
+        users_count = (await (await db.execute("SELECT COUNT(*) FROM users")).fetchone())[0]
+        cards_count = (await (await db.execute("SELECT COUNT(*) FROM cards")).fetchone())[0]
+    await c.message.edit_text(f"📊 <b>Статистика:</b>\n👥 Игроков: {users_count}\n🃏 Карт в базе: {cards_count}", parse_mode=ParseMode.HTML)
+    await c.answer()
+
+@dp.callback_query(F.data == "admin_create_promo")
+async def admin_create_promo_cb(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID: return
+    await c.message.answer(
+        "Введите данные промокода через пробел:\n"
+        "<code>[Название] [Тип: money/bbc_money] [Сумма] [Кол-во активаций]</code>\n\n"
+        "Пример: <code>NEWYEAR money 1000 50</code>", 
+        parse_mode=ParseMode.HTML
+    )
+    await state.set_state(AdminStates.waiting_for_promo_data)
+    await c.answer()
+
+@dp.message(AdminStates.waiting_for_promo_data)
+async def process_promo_data(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID: return
+    args = m.text.split()
+    if len(args) != 4 or args[1] not in ["money", "bbc_money"] or not args[2].isdigit() or not args[3].isdigit():
+        await state.clear()
+        return await m.answer("❌ Ошибка формата. Попробуй снова через /admin.")
+    
+    code, rew_type, rew_val, uses = args[0], args[1], int(args[2]), int(args[3])
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            await db.execute("INSERT INTO promocodes (code, reward_type, reward_val, uses_left) VALUES (?,?,?,?)", 
+                             (code, rew_type, rew_val, uses))
+            await db.commit()
+            await m.answer(f"✅ Промокод <code>{code}</code> успешно создан!", parse_mode=ParseMode.HTML)
+        except aiosqlite.IntegrityError:
+            await m.answer("❌ Такой промокод уже существует!")
+            
+    await state.clear()
 
 @dp.message(F.photo & F.caption.startswith("/add_card"))
 async def add_card(m: Message):
@@ -244,12 +337,14 @@ async def promo_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT reward_type, reward_val, uses_left FROM promocodes WHERE code = ?", (args[1],))
         p = await res.fetchone()
-        if not p or p[2] <= 0: return await m.answer("❌ Код не найден.")
+        if not p or p[2] <= 0: return await m.answer("❌ Код не найден или закончились активации.")
         col = "money" if p[0] == "money" else "bbc_money"
         await db.execute(f"UPDATE users SET {col} = {col} + ? WHERE user_id = ?", (p[1], m.from_user.id))
         await db.execute("UPDATE promocodes SET uses_left = uses_left - 1 WHERE code = ?", (args[1],))
         await db.commit()
-    await m.answer(f"✅ +{p[1]} {p[0]}!")
+    
+    val_name = "Монет" if p[0] == "money" else "BBC"
+    await m.answer(f"✅ Промокод активирован! Начислено: {p[1]} {val_name}")
 
 async def main():
     await init_db()
@@ -259,4 +354,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-                   
+        
