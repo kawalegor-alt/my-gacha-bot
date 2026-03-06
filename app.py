@@ -6,6 +6,7 @@ from aiogram.types import Message, BotCommand, CallbackQuery, InlineKeyboardMark
 from aiogram.enums import ParseMode
 
 # --- КОНФИГУРАЦИЯ ---
+# ВАЖНО: Никогда не свети свой токен в открытом доступе. Лучше убери его в .env файл!
 TOKEN = "8666119275:AAEBl4VeUTKGzj-WVrrb8asakNfgIqlqOQA" 
 ADMIN_ID = 1548461377 
 DB_PATH = "gacha_bot.db"
@@ -97,7 +98,7 @@ async def profile_cmd(m: Message, bot: Bot):
         await m.answer(text, parse_mode=ParseMode.HTML)
 
 # --- ГАЧА (ВЫЗОВ СЛОВОМ И КОМАНДОЙ) ---
-@dp.message(F.text.lower().in_({"карта", "карту", "/draw"}) | Command("draw"))
+@dp.message(F.text.lower().in_({"карта", "карту", "/draw"}))
 async def draw_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT rank, last_draw, draw_count FROM users WHERE user_id = ?", (m.from_user.id,))
@@ -187,7 +188,8 @@ async def inventory_cmd(m: Message):
 
 @dp.message(Command("casino"))
 async def casino_cmd(m: Message):
-    args = m.text.split()
+    text = m.text or m.caption or ""
+    args = text.split()
     if len(args) < 2 or not args[1].isdigit(): return await m.answer("🎰 Формат: /casino 100")
     bet = int(args[1])
     
@@ -222,6 +224,7 @@ async def top_cb(c: CallbackQuery):
         users = await res.fetchall()
     text = "🏆 <b>ТОП 10:</b>\n\n" + "\n".join([f"{i+1}. {u[0]} — {u[1]}" for i, u in enumerate(users)])
     await c.message.edit_text(text, parse_mode=ParseMode.HTML)
+    await c.answer()  # <--- Обязательно, чтобы кнопка не висела в загрузке!
 
 @dp.message(F.photo & F.caption.startswith("/add_card"))
 async def add_card(m: Message):
@@ -235,7 +238,8 @@ async def add_card(m: Message):
 
 @dp.message(Command("promo"))
 async def promo_cmd(m: Message):
-    args = m.text.split()
+    text = m.text or m.caption or ""
+    args = text.split()
     if len(args) < 2: return await m.answer("🎁 /promo КОД")
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT reward_type, reward_val, uses_left FROM promocodes WHERE code = ?", (args[1],))
@@ -255,4 +259,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-        
+                   
