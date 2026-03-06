@@ -406,17 +406,19 @@ async def shop_cb(c: CallbackQuery, state: FSMContext):
 
 @dp.message(ShopStates.waiting_for_title)
 async def process_new_title(m: Message, state: FSMContext):
-    new_title = m.text[:30]
+    new_title = (m.text or "")[:30]
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET bbc_money=bbc_money-10, titles=? WHERE user_id=?", (new_title, m.from_user.id))
         await db.commit()
     await m.answer(f"✅ Твой новый титул: <b>{new_title}</b>", parse_mode=ParseMode.HTML)
     await state.clear()
-         @dp.message(Command("promo"))
+
+@dp.message(Command("promo"))
 async def promo_cmd(m: Message):
     args = (m.text or "").split()
     if len(args) < 2: return await m.answer("🎁 Использование: /promo КОД")
     code = args[1]
+
     async with aiosqlite.connect(DB_PATH) as db:
         if await (await db.execute("SELECT 1 FROM used_promos WHERE user_id=? AND code=?", (m.from_user.id, code))).fetchone():
             return await m.answer("❌ Код уже активирован!")
