@@ -257,7 +257,8 @@ async def coinflip_cmd(m: Message):
             await m.answer(f"🪙 Выпал {result}. Ты проиграл {bet} монет.")
         await db.commit()
         @dp.message(Command("dice"))
-async def dice_cmd(m: Message):
+        
+    async def dice_cmd(m: Message):
     args = (m.text or "").split()
     if len(args) < 2 or not args[1].isdigit(): return await m.answer("🎲 Формат: /dice [ставка]")
     bet = int(args[1])
