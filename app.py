@@ -185,7 +185,7 @@ async def shop_cmd(m: Message):
         [InlineKeyboardButton(text="🏆 Свой Кастомный Титул — 20 💎", callback_data="shop_buy_custom_title")]
     ])
     await m.answer("🛒 <b>МАГАЗИН</b>\nПотрать свои монеты и BBC с умом:", reply_markup=kb, parse_mode=ParseMode.HTML)
-        @dp.callback_query(F.data.startswith("shop_"))
+    @dp.callback_query(F.data.startswith("shop_"))
 async def shop_cb(c: CallbackQuery, state: FSMContext):
     action = c.data.split("_")[2:] # shop_buy_...
     
