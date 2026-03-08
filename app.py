@@ -131,7 +131,7 @@ async def bank_cmd(m: Message):
         row = await res.fetchone()
         if not row: return
         
-                last_upd = datetime.fromisoformat(row[2])
+                        last_upd = datetime.fromisoformat(row[2])
         hours_passed = (datetime.now() - last_upd).total_seconds() // 3600
         new_bank = row[1]
         if hours_passed >= 1 and new_bank > 0:
@@ -157,8 +157,7 @@ async def bank_cmd(m: Message):
         
         await db.commit()
         await m.answer("✅ Операция успешна!")
-
-
+        
 @dp.message(Command("biz") | F.text.lower().in_({"бизнес", "биз"}))
 async def biz_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
