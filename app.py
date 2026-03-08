@@ -132,7 +132,7 @@ async def bank_cmd(m: Message):
         if not row: return
         
         last_upd = datetime.fromisoformat(row[2])
-        hours_passed = (datetime.now() - last_upd).total_seconds() // 3600
+                hours_passed = (datetime.now() - last_upd).total_seconds() // 3600
         new_bank = row[1]
         if hours_passed >= 1 and new_bank > 0:
             new_bank += int(new_bank * 0.01 * hours_passed)
@@ -143,19 +143,18 @@ async def bank_cmd(m: Message):
         if len(args) == 1:
             return await m.answer(f"🏦 <b>Ваш Банк</b>\nБаланс: {new_bank} 💰\nНаличные: {row[0]} 💰\n\nПример: <i>банк dep 100</i> или <i>банк with 50</i>", parse_mode=ParseMode.HTML)
         
-                action = args[1]
+        action = args[1]
         if len(args) < 3 or not args[2].isdigit(): 
             return await m.answer("Формат: банк [dep/with] [сумма]")
         
         amt = int(args[2])
-        
         if action == "dep":
             if row[0] < amt: return await m.answer("❌ Недостаточно наличных!")
             await db.execute("UPDATE users SET money=money-?, bank_balance=bank_balance+? WHERE user_id=?", (amt, amt, m.from_user.id))
         elif action == "with":
             if new_bank < amt: return await m.answer("❌ Недостаточно средств в банке!")
             await db.execute("UPDATE users SET money=money+?, bank_balance=bank_balance-? WHERE user_id=?", (amt, amt, m.from_user.id))
-            
+        
         await db.commit()
         await m.answer("✅ Операция успешна!")
 
