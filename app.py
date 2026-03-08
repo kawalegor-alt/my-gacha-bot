@@ -147,7 +147,7 @@ async def bank_cmd(m: Message):
         if len(args) < 3 or not args[2].isdigit(): return await m.answer("Формат: банк [dep/with] [сумма]")
         amt = int(args[2])
         
-        if action == "dep":
+        if         if action == "dep":
             if row[0] < amt: return await m.answer("❌ Недостаточно наличных!")
             await db.execute("UPDATE users SET money=money-?, bank_balance=bank_balance+? WHERE user_id=?", (amt, amt, m.from_user.id))
         elif action == "with":
@@ -155,7 +155,8 @@ async def bank_cmd(m: Message):
             await db.execute("UPDATE users SET money=money+?, bank_balance=bank_balance-? WHERE user_id=?", (amt, amt, m.from_user.id))
         await db.commit()
         await m.answer("✅ Операция успешна!")
-        @dp.message(Command("biz") | F.text.lower().in_({"бизнес", "биз"}))
+
+@dp.message(Command("biz") | F.text.lower().in_({"бизнес", "биз"}))
 async def biz_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT money, biz_level, biz_last_collect FROM users WHERE user_id=?", (m.from_user.id,))
