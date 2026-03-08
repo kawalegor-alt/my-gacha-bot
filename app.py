@@ -232,18 +232,19 @@ async def draw_cmd(m: Message):
             return await m.answer(f"⏳ Рано! Жди {wait.seconds // 3600}ч. {(wait.seconds // 60) % 60}мин.")
 
         p = random.random()
-        rar = 1
-        if p < 0.015: rar = 5
-        elif p < 0.07: rar = 4
-        elif p < 0.20: rar = 3
-        elif p < 0.50: rar = 2
-        if dc >= 49: rar = 5 
+rar = 1
+if p < 0.015: rar = 5
+elif p < 0.07: rar = 4
+elif p < 0.20: rar = 3
+elif p < 0.50: rar = 2
+if dc >= 49: rar = 5 
 
- card = await (await db.execute("SELECT card_id, name, file_id FROM cards WHERE rarity = ? ORDER BY RANDOM() LIMIT 1", (rar,))).fetchone()
-        if not card: return await m.answer("⚠️ Ошибка: Карт нет в базе.")
+card = await (await db.execute("SELECT card_id, name, file_id FROM cards WHERE rarity = ? ORDER BY RANDOM() LIMIT 1", (rar,))).fetchone()
+if not card: return await m.answer("⚠️ Ошибка: Карт нет в базе.")
 
-        is_dup = await (await db.execute("SELECT count FROM inventory WHERE user_id=? AND card_id=?", (m.from_user.id, card[0]))).fetchone()
-        rew = REWARDS[rar]["d" if is_dup else "n"]
+is_dup = await (await db.execute("SELECT count FROM inventory WHERE user_id=? AND card_id=?", (m.from_user.id, card[0]))).fetchone()
+rew = REWARDS[rar]["d" if is_dup else "n"]
+
         
         if is_dup: 
             await db.execute("UPDATE inventory SET count=count+1 WHERE user_id=? AND card_id=?", (m.from_user.id, card[0]))
