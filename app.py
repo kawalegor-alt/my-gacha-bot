@@ -127,7 +127,7 @@ async def profile_cmd(m: Message):
 async def bank_cmd(m: Message):
     args = m.text.lower().split()
     async with aiosqlite.connect(DB_PATH) as db:
-                res = await db.execute("SELECT money, bank_balance, bank_last_update FROM users WHERE user_id=?", (m.from_user.id,))
+                        res = await db.execute("SELECT money, bank_balance, bank_last_update FROM users WHERE user_id=?", (m.from_user.id,))
         row = await res.fetchone()
         if not row: return
 
@@ -157,6 +157,8 @@ async def bank_cmd(m: Message):
         
         await db.commit()
         await m.answer("✅ Операция успешна!")
+[cite_start]
+
 
         
 @dp.message(Command("biz") | F.text.lower().in_({"бизнес", "биз"}))
