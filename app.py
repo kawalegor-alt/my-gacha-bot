@@ -130,7 +130,6 @@ async def bank_cmd(m: Message):
         res = await db.execute("SELECT money, bank_balance, bank_last_update FROM users WHERE user_id=?", (m.from_user.id,))
         row = await res.fetchone()
         if not row: return
-        
                         last_upd = datetime.fromisoformat(row[2])
         hours_passed = (datetime.now() - last_upd).total_seconds() // 3600
         new_bank = row[1]
