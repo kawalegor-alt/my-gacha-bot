@@ -253,7 +253,7 @@ async def draw_cmd(m: Message):
         await db.commit()
         await add_exp(m.from_user.id, 10)
 
-                cap = (f"🃏 <b>{card[1]}</b> (ID: {card[0]})\nРанг: {'⭐'*rar} ({RARITY_NAMES.get(rar)})\n"
+                        cap = (f"🃏 <b>{card[1]}</b> (ID: {card[0]})\nРанг: {'⭐'*rar} ({RARITY_NAMES.get(rar)})\n"
                f"{'♻️ Дубликат!' if is_dup else '✨ Новая карта!'}\n💰 +{rew} монет")
         await m.answer_photo(card[2], caption=cap, parse_mode=ParseMode.HTML)
 
