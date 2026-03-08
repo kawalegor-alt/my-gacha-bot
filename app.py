@@ -127,7 +127,7 @@ async def profile_cmd(m: Message):
 async def bank_cmd(m: Message):
     args = m.text.lower().split()
     async with aiosqlite.connect(DB_PATH) as db:
-                        res = await db.execute("SELECT money, bank_balance, bank_last_update FROM users WHERE user_id=?", (m.from_user.id,))
+        res = await db.execute("SELECT money, bank_balance, bank_last_update FROM users WHERE user_id=?", (m.from_user.id,))
         row = await res.fetchone()
         if not row: return
 
@@ -144,6 +144,7 @@ async def bank_cmd(m: Message):
             return await m.answer(f"🏦 <b>Ваш Банк</b>\nБаланс: {new_bank} 💰\nНаличные: {row[0]} 💰\n\nПример: <i>банк dep 100</i> или <i>банк with 50</i>", parse_mode=ParseMode.HTML)
         
         action = args[1]
+
         if len(args) < 3 or not args[2].isdigit(): 
             return await m.answer("Формат: банк [dep/with] [сумма]")
         
