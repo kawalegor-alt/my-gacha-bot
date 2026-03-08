@@ -239,7 +239,7 @@ async def draw_cmd(m: Message):
         elif p < 0.50: rar = 2
         if dc >= 49: rar = 5 
 
-                        card = await (await db.execute("SELECT card_id, name, file_id FROM cards WHERE rarity = ? ORDER BY RANDOM() LIMIT 1", (rar,))).fetchone()
+ card = await (await db.execute("SELECT card_id, name, file_id FROM cards WHERE rarity = ? ORDER BY RANDOM() LIMIT 1", (rar,))).fetchone()
         if not card: return await m.answer("⚠️ Ошибка: Карт нет в базе.")
 
         is_dup = await (await db.execute("SELECT count FROM inventory WHERE user_id=? AND card_id=?", (m.from_user.id, card[0]))).fetchone()
