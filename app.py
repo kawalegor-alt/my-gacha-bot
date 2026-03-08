@@ -245,9 +245,10 @@ if not card: return await m.answer("⚠️ Ошибка: Карт нет в ба
 is_dup = await (await db.execute("SELECT count FROM inventory WHERE user_id=? AND card_id=?", (m.from_user.id, card[0]))).fetchone()
 rew = REWARDS[rar]["d" if is_dup else "n"]
       
-        if is_dup: 
-            await db.execute("UPDATE inventory SET count=count+1 WHERE user_id=? AND card_id=?", (m.from_user.id, card[0]))
-        else: 
+if is_dup: 
+    await db.execute("UPDATE inventory SET count=count+1 WHERE user_id=? AND card_id=?", (m.from_user.id, card[0]))
+else:
+
             await db.execute("INSERT INTO inventory (user_id, card_id, count) VALUES (?,?,1)", (m.from_user.id, card[0]))
 
         await db.execute("UPDATE users SET money=money+?, last_draw=?, draw_count=? WHERE user_id=?", 
