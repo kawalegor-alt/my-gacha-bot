@@ -145,11 +145,11 @@ async def bank_cmd(m: Message):
         
         action = args[1]
         if len(args) < 3 or not args[2].isdigit(): return await m.answer("Формат: банк [dep/with] [сумма]")
-        amt = int(args[2])
+                amt = int(args[2])
         
-                if action == "dep":
+        if action == "dep":
             if row[0] < amt: return await m.answer("❌ Недостаточно наличных!")
-            await db.execute("UPDATE users SET money=money-?, bank_balance=bank_balance+? WHERE user_id=?", (amt, amt, m.from_user.id))
+await db.execute("UPDATE users SET money=money-?, bank_balance=bank_balance+? WHERE user_id=?", (amt, amt, m.from_user.id))
         elif action == "with":
             if new_bank < amt: return await m.answer("❌ Недостаточно средств в банке!")
             await db.execute("UPDATE users SET money=money+?, bank_balance=bank_balance-? WHERE user_id=?", (amt, amt, m.from_user.id))
