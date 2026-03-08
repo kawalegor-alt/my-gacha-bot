@@ -23,7 +23,6 @@ CASINO_RIG_CHANCE = None
 
 class AdminStates(StatesGroup):
     waiting_for_promo_data = State()
-    # ... (остальные стейты админа)
     waiting_for_rig = State()
     waiting_for_mythril = State()
 
@@ -64,6 +63,7 @@ async def add_exp(user_id, amount):
             exp -= next_lvl_exp
         await db.execute("UPDATE users SET exp = ?, level = ? WHERE user_id = ?", (exp, lvl, user_id))
         await db.commit()
+
 @dp.message(Command("start"))
 async def start_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -122,8 +122,7 @@ async def profile_cmd(m: Message):
             await m.answer_photo(photos.photos[0][0].file_id, caption=text, parse_mode=ParseMode.HTML)
         else: await m.answer(text, parse_mode=ParseMode.HTML)
     except: await m.answer(text, parse_mode=ParseMode.HTML)
-
-@dp.message(Command("bank") | F.text.lower().startswith("банк"))
+        @dp.message(Command("bank") | F.text.lower().startswith("банк"))
 async def bank_cmd(m: Message):
     args = m.text.lower().split()
     async with aiosqlite.connect(DB_PATH) as db:
@@ -158,10 +157,7 @@ async def bank_cmd(m: Message):
         
         await db.commit()
         await m.answer("✅ Операция успешна!")
-[cite_start]
 
-
-        
 @dp.message(Command("biz") | F.text.lower().in_({"бизнес", "биз"}))
 async def biz_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -232,12 +228,12 @@ async def draw_cmd(m: Message):
             return await m.answer(f"⏳ Рано! Жди {wait.seconds // 3600}ч. {(wait.seconds // 60) % 60}мин.")
 
         p = random.random()
-rar = 1
-if p < 0.015: rar = 5
-elif p < 0.07: rar = 4
-elif p < 0.20: rar = 3
-elif p < 0.50: rar = 2
-if dc >= 49: rar = 5 
+        rar = 1
+        if p < 0.015: rar = 5
+        elif p < 0.07: rar = 4
+        elif p < 0.20: rar = 3
+        elif p < 0.50: rar = 2
+        if dc >= 49: rar = 5 
 
         card = await (await db.execute("SELECT card_id, name, file_id FROM cards WHERE rarity = ? ORDER BY RANDOM() LIMIT 1", (rar,))).fetchone()
         if not card: return await m.answer("⚠️ Ошибка: Карт нет в базе.")
@@ -253,21 +249,14 @@ if dc >= 49: rar = 5
         await db.execute("UPDATE users SET money=money+?, last_draw=?, draw_count=? WHERE user_id=?", 
                          (rew, datetime.now().isoformat(), 0 if rar == 5 else dc+1, m.from_user.id))
 
-
         await db.commit()
         await add_exp(m.from_user.id, 10)
 
         cap = (f"🃏 <b>{card[1]}</b> (ID: {card[0]})\nРанг: {'⭐'*rar} ({RARITY_NAMES.get(rar)})\n"
                f"{'♻️ Дубликат!' if is_dup else '✨ Новая карта!'}\n💰 +{rew} монет")
         await m.answer_photo(card[2], caption=cap, parse_mode=ParseMode.HTML)
-
-
-
-
-
-@dp.message(Command("clan") | F.text.lower().startswith("клан"))
+        @dp.message(Command("clan") | F.text.lower().startswith("клан"))
 async def clan_cmd(m: Message):
-
     args = m.text.lower().split()
     async with aiosqlite.connect(DB_PATH) as db:
         res = await db.execute("SELECT clan_id FROM users WHERE user_id=?", (m.from_user.id,))
@@ -323,7 +312,8 @@ async def shop_cb(c: CallbackQuery):
             [InlineKeyboardButton(text="⏱ Часы (-кд гачи) (60 💎)", callback_data=f"buy_{c.from_user.id}_item_Часы")]
         ])
         await c.message.edit_text("💎 <b>Покупка Предметов (за BBC):</b>\nЭкипировать можно только 1!", reply_markup=kb, parse_mode=ParseMode.HTML)
-    async def get_win_chance(user_id, base_chance):
+
+async def get_win_chance(user_id, base_chance):
     global CASINO_RIG_CHANCE
     if CASINO_RIG_CHANCE is not None:
         chance = CASINO_RIG_CHANCE
@@ -381,7 +371,6 @@ async def coin_cmd(m: Message):
         await db.commit()
     await add_exp(m.from_user.id, 1)
     await m.answer(f"🪙 {txt}")
-
 @dp.message(Command("duel") | F.text.lower().in_({"дуэль"}))
 async def duel_cmd(m: Message, state: FSMContext):
     if not m.reply_to_message:
@@ -426,7 +415,8 @@ async def duel_accept(m: Message, state: FSMContext):
     
     await state.clear()
     await m.answer(f"💥 ВЫСТРЕЛ!\nИгрок {loser} убит и забанен. Победитель забирает всё!")
-    @dp.message(Command("pay") | F.text.lower().startswith("передать"))
+
+@dp.message(Command("pay") | F.text.lower().startswith("передать"))
 async def pay_cmd(m: Message):
     args = m.text.lower().split()
     target_id = None
