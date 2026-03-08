@@ -131,8 +131,8 @@ async def bank_cmd(m: Message):
         row = await res.fetchone()
         if not row: return
         
-        last_upd = datetime.fromisoformat(row[2])
-                hours_passed = (datetime.now() - last_upd).total_seconds() // 3600
+                last_upd = datetime.fromisoformat(row[2])
+        hours_passed = (datetime.now() - last_upd).total_seconds() // 3600
         new_bank = row[1]
         if hours_passed >= 1 and new_bank > 0:
             new_bank += int(new_bank * 0.01 * hours_passed)
