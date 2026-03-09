@@ -121,7 +121,7 @@ async def add_exp(user_id, amount):
             (exp, lvl, user_id))
         await db.commit()
         @dp.message(Command("start"))
-async def start_cmd(m: Message):
+      async def start_cmd(m: Message):
     async with aiosqlite.connect(DB_PATH) as db:
         r = "Мифрил" if m.from_user.id == ADMIN_ID else "Бронза"
         await db.execute(
