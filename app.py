@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, Awaitable
 TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "1548461377"))
 DB_PATH = "gacha_bot.db"
+BOT_TOKEN=8666119275:AAEBl4VeUTKGzj-WVrrb8asakNfgIqlqOQA
 
 logging.basicConfig(level=logging.INFO)
 dp = Dispatcher()
