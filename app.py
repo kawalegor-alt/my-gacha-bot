@@ -5679,6 +5679,7 @@ async def health_server():
 
 async def main():
     await init_db()
+    await bot.delete_webhook(drop_pending_updates=True)
     log.info("Bot started!")
     await asyncio.gather(
         health_server(),
