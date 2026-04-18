@@ -5660,10 +5660,30 @@ async def process_me_revoke(m: Message, state: FSMContext):
     await m.answer(f"❌ Разрешение /me отозвано у <code>{uid}</code>", parse_mode=ParseMode.HTML)
 
 
+async def health_server():
+    """Minimal HTTP health-check server for platform probes."""
+    from aiohttp import web
+
+    async def handle(request):
+        return web.Response(text="ok")
+
+    app_http = web.Application()
+    app_http.router.add_get("/", handle)
+    app_http.router.add_get("/health", handle)
+    runner = web.AppRunner(app_http)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    await site.start()
+    log.info("Health server started on :8080")
+
+
 async def main():
     await init_db()
     log.info("Bot started!")
-    await dp.start_polling(bot)
+    await asyncio.gather(
+        health_server(),
+        dp.start_polling(bot),
+    )
 
 
 if __name__ == "__main__":
