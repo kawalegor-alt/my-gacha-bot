@@ -36,7 +36,7 @@ from aiohttp import web
 #  Конфигурация
 # =============================================================================
 # ⚠️  ВСТАВЬ СВОЙ ТОКЕН ПЕРЕД ЗАПУСКОМ
-TOKEN = os.environ.get("BOT_TOKEN", "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА")
+TOKEN = os.environ.get("BOT_TOKEN", "8666119275:AAEBl4VeUTKGzj-WVrrb8asakNfgIqlqOQA")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "1548461377"))
 DB_PATH = os.environ.get("DB_PATH", "game_bot.db")
 
