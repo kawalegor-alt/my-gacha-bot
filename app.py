@@ -12,7 +12,6 @@ import random
 import asyncio
 import time
 import sqlite3
-from io import BytesIO
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -37,7 +36,7 @@ from aiohttp import web
 #  Конфигурация
 # =============================================================================
 # ⚠️  ВСТАВЬ СВОЙ ТОКЕН ПЕРЕД ЗАПУСКОМ
-TOKEN = os.environ.get("BOT_TOKEN", "8666119275:AAEBl4VeUTKGzj-WVrrb8asakNfgIqlqOQA")
+TOKEN = os.environ.get("BOT_TOKEN", "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "1548461377"))
 DB_PATH = os.environ.get("DB_PATH", "game_bot.db")
 
@@ -335,6 +334,26 @@ class AntiSpamMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+
+_username_seen: set = set()
+
+class UsernameUpdateMiddleware(BaseMiddleware):
+    """Saves Telegram username to DB (once per session per user)."""
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user and user.username and user.id not in _username_seen:
+            _username_seen.add(user.id)
+            try:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "UPDATE users SET username = ? WHERE user_id = ?",
+                        (user.username.lower(), user.id)
+                    )
+                    await db.commit()
+            except Exception:
+                pass
+        return await handler(event, data)
+
 class OwnerCallbackMiddleware(BaseMiddleware):
     """Only the user who triggered the message can tap its inline buttons."""
     PUBLIC_PREFIXES = ("marry_acc_", "marry_dec_")
@@ -356,6 +375,7 @@ dp.callback_query.outer_middleware(BanCheckMiddleware())
 dp.message.middleware(AntiSpamMiddleware())
 dp.callback_query.middleware(AntiSpamMiddleware())
 dp.callback_query.middleware(OwnerCallbackMiddleware())
+dp.message.outer_middleware(UsernameUpdateMiddleware())
 
 # =============================================================================
 #  ERROR HANDLER
@@ -396,7 +416,8 @@ async def init_db():
             shield INTEGER DEFAULT 0,
             last_daily TEXT DEFAULT '',
             last_gacha TEXT DEFAULT '',
-            is_frozen INTEGER DEFAULT 0
+            is_frozen INTEGER DEFAULT 0,
+            username TEXT DEFAULT ''
         )""")
         await db.execute("""CREATE TABLE IF NOT EXISTS cards (
             card_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -451,7 +472,8 @@ async def init_db():
         await db.execute("""CREATE TABLE IF NOT EXISTS limited_admins (
             user_id INTEGER PRIMARY KEY,
             added_by INTEGER,
-            added_at TEXT DEFAULT ''
+            added_at TEXT DEFAULT '',
+            is_full INTEGER DEFAULT 0
         )""")
         await db.commit()
         await migrate_db(db)
@@ -490,6 +512,12 @@ async def migrate_db(db):
         await db.execute("ALTER TABLE cards ADD COLUMN image_id TEXT DEFAULT ''")
     if "source_user_id" not in ccols:
         await db.execute("ALTER TABLE cards ADD COLUMN source_user_id INTEGER DEFAULT 0")
+    # Миграция limited_admins: добавить is_full если нет
+    cur3 = await db.execute("PRAGMA table_info(limited_admins)")
+    la_cols = {r[1] for r in await cur3.fetchall()}
+    if "is_full" not in la_cols:
+        await db.execute("ALTER TABLE limited_admins ADD COLUMN is_full INTEGER DEFAULT 0")
+        log.info("Migrated limited_admins.is_full")
     await db.commit()
 
 
@@ -510,7 +538,13 @@ async def _ensure_game_tables(db):
     await db.execute("""CREATE TABLE IF NOT EXISTS me_permissions (
         user_id INTEGER PRIMARY KEY, granted_by INTEGER, granted_at TEXT DEFAULT '')""")
     await db.execute("""CREATE TABLE IF NOT EXISTS limited_admins (
-        user_id INTEGER PRIMARY KEY, added_by INTEGER, added_at TEXT DEFAULT '')""")
+        user_id INTEGER PRIMARY KEY, added_by INTEGER, added_at TEXT DEFAULT '', is_full INTEGER DEFAULT 0)""")
+    # username column migration
+    try:
+        await db.execute("ALTER TABLE users ADD COLUMN username TEXT DEFAULT ''")
+        await db.commit()
+    except Exception:
+        pass
     for col, ctype, default in [("image_id", "TEXT", "''"), ("source_user_id", "INTEGER", "0")]:
         try:
             await db.execute(f"ALTER TABLE cards ADD COLUMN {col} {ctype} DEFAULT {default}")
@@ -528,11 +562,70 @@ async def _ensure_social_tables(db):
     await db.execute("""CREATE TABLE IF NOT EXISTS me_permissions (
         user_id INTEGER PRIMARY KEY, granted_by INTEGER, granted_at TEXT DEFAULT '')""")
     await db.execute("""CREATE TABLE IF NOT EXISTS limited_admins (
-        user_id INTEGER PRIMARY KEY, added_by INTEGER, added_at TEXT DEFAULT '')""")
+        user_id INTEGER PRIMARY KEY, added_by INTEGER, added_at TEXT DEFAULT '', is_full INTEGER DEFAULT 0)""")
 
 # =============================================================================
 #  HELPER functions
 # =============================================================================
+
+
+async def resolve_user(m: Message) -> tuple:
+    """
+    Resolve target user from:
+      1. Reply to message (from_user of replied msg)
+      2. @username entity (text_mention or mention)
+      3. Plain @username text
+      4. Numeric user ID
+
+    Returns (user_id: int | None, display_name: str, remaining_text: str).
+    On failure: (None, error_message, "").
+    """
+    text = (m.text or "").strip()
+
+    # 1. Reply
+    if m.reply_to_message and m.reply_to_message.from_user:
+        ru = m.reply_to_message.from_user
+        return ru.id, ru.full_name, text
+
+    # 2. Entities
+    if m.entities:
+        for ent in m.entities:
+            if ent.type == "text_mention" and ent.user:
+                rest = text[ent.offset + ent.length:].strip()
+                return ent.user.id, ent.user.full_name, rest
+            if ent.type == "mention":
+                uname = text[ent.offset + 1: ent.offset + ent.length]
+                rest = text[ent.offset + ent.length:].strip()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cur = await db.execute(
+                        "SELECT user_id, nickname FROM users WHERE LOWER(username) = LOWER(?)", (uname,))
+                    row = await cur.fetchone()
+                if row:
+                    return row[0], row[1] or f"@{uname}", rest
+                return None, f"❌ Игрок @{uname} не найден в базе!", ""
+
+    # 3. Plain @username
+    if text.startswith("@"):
+        parts = text.split(maxsplit=1)
+        uname = parts[0].lstrip("@")
+        rest = parts[1] if len(parts) > 1 else ""
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur = await db.execute(
+                "SELECT user_id, nickname FROM users WHERE LOWER(username) = LOWER(?)", (uname,))
+            row = await cur.fetchone()
+        if row:
+            return row[0], row[1] or f"@{uname}", rest
+        return None, f"❌ Игрок @{uname} не найден в базе!", ""
+
+    # 4. Numeric ID
+    parts = text.split(maxsplit=1)
+    if parts:
+        uid = parse_positive_int(parts[0])
+        if uid:
+            rest = parts[1] if len(parts) > 1 else ""
+            return uid, str(uid), rest
+
+    return None, "❌ Укажи пользователя: ответь на сообщение, @юзернейм или ID", ""
 
 async def is_limited_admin(user_id: int) -> bool:
     """Проверяет, является ли пользователь ограниченным админом."""
@@ -541,6 +634,18 @@ async def is_limited_admin(user_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_social_tables(db)
         cur = await db.execute("SELECT user_id FROM limited_admins WHERE user_id = ?", (user_id,))
+        return bool(await cur.fetchone())
+
+
+async def is_full_admin(user_id: int) -> bool:
+    """Проверяет, является ли пользователь полноценным ограниченным админом (is_full=1)."""
+    if user_id == ADMIN_ID:
+        return False  # Главный админ — не ограниченный
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_social_tables(db)
+        cur = await db.execute(
+            "SELECT user_id FROM limited_admins WHERE user_id = ? AND is_full = 1", (user_id,)
+        )
         return bool(await cur.fetchone())
 
 
@@ -821,7 +926,10 @@ async def profile_cmd(m: Message):
 #  GACHA
 # =============================================================================
 async def do_gacha(db, user_id: int, count: int, lucky: bool = False):
-    cur = await db.execute("SELECT card_id, name, rarity, image_id FROM cards")
+    cur = await db.execute(
+        "SELECT card_id, name, rarity, image_id FROM cards "
+        "WHERE image_id IS NOT NULL AND TRIM(image_id) != '' "
+        "AND TRIM(image_id) NOT IN ('None', 'null', '0')")
     all_cards = await cur.fetchall()
     if not all_cards:
         return [], "админ не добавил карты. @gde_DiadSoul работай сука!!!"
@@ -1350,7 +1458,7 @@ async def crash_next_cb(c: CallbackQuery):
     now = _time.time()
     last = _crash_last_click.get(uid, 0)
     if now - last < 1.5:
-        return await c.answer(f"⏳ Подожди 1.5 сек между ходами!", show_alert=False)
+        return await c.answer("⏳ Подожди 1.5 сек между ходами!", show_alert=False)
     _crash_last_click[uid] = now
     game = _crash_games.get(uid)
     if not game:
@@ -1828,36 +1936,6 @@ async def level_menu_cb(c: CallbackQuery):
 
 
 # =============================================================================
-#  EYE OF NEVER (/nev)
-# =============================================================================
-@dp.message(Command("nev"))
-async def nev_cmd(m: Message):
-    phases = [
-        "🌑 Новолуние — удача скрыта", "🌒 Растущий серп — шансы улучшаются",
-        "🌓 Первая четверть — баланс сил", "🌔 Прибывающая — удача на подъёме",
-        "🌕 Полнолуние — максимальная сила!", "🌖 Убывающая — будь осторожен",
-        "🌗 Последняя четверть — риск высок", "🌘 Старый серп — опасное время",
-    ]
-    luck = random.randint(1, 100)
-    phase = random.choice(phases)
-    if luck >= 80:
-        verdict = "🟢 Сейчас отличное время для ставок!"
-    elif luck >= 50:
-        verdict = "🟡 Нормальные шансы. Рискуй с умом."
-    elif luck >= 25:
-        verdict = "🟠 Удача не на твоей стороне."
-    else:
-        verdict = "🔴 Сегодня лучше не играть!"
-    text = (f"🔮 <b>ГЛАЗ НЕВЕРА</b>\n\nЗаглянул в будущее...\n\n"
-            f"🎰 Рулетка: 48.6% (красное/чёрное)\n🎲 Кости: 16.7% (угадать число)\n"
-            f"🪙 Монетка: 50%\n📈 Краш: ~60% (x1+), ~25% (x2+)\n\n"
-            f"💫 <b>Твоя удача: {luck}%</b>\n{phase}\n\n{verdict}")
-    if m.from_user.id == ADMIN_ID and rig_mode == "win100":
-        text += f"\n\n🎯 <i>ПОДКРУТ: 100% побед ({rig_remaining} игр)</i>"
-    await m.answer(text, parse_mode=ParseMode.HTML)
-
-
-# =============================================================================
 #  ROB (/rob)
 # =============================================================================
 @dp.message(Command("rob"))
@@ -1920,41 +1998,6 @@ async def rob_cmd(m: Message):
             await db.commit()
             text = f"🚨 <b>Провал!</b>\n\nТебя поймали! Штраф: <b>{fine:,} 💰</b>"
     await m.answer(text, parse_mode=ParseMode.HTML)
-
-
-# =============================================================================
-#  GIFT (/gift)
-# =============================================================================
-@dp.message(Command("gift"))
-async def gift_cmd(m: Message):
-    if not m.reply_to_message or not m.reply_to_message.from_user:
-        return await m.answer("🎁 Ответь на сообщение: /gift [ID карты]")
-    args = (m.text or "").split()
-    if len(args) < 2:
-        return await m.answer("🎁 Формат: /gift [ID карты]")
-    card_id = parse_positive_int(args[1])
-    if not card_id:
-        return await m.answer("❌ ID карты — целое число > 0!")
-    target_id = m.reply_to_message.from_user.id
-    uid = m.from_user.id
-    if target_id == uid:
-        return await m.answer("❌ Нельзя дарить себе!")
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT id FROM user_cards WHERE user_id = ? AND card_id = ? LIMIT 1", (uid, card_id))
-        uc = await cur.fetchone()
-        if not uc:
-            return await m.answer("❌ У тебя нет этой карты!")
-        tcur = await db.execute("SELECT nickname FROM users WHERE user_id = ?", (target_id,))
-        target = await tcur.fetchone()
-        if not target:
-            return await m.answer("❌ Получатель не зарегистрирован!")
-        ccur = await db.execute("SELECT name, rarity FROM cards WHERE card_id = ?", (card_id,))
-        card = await ccur.fetchone()
-        await db.execute("UPDATE user_cards SET user_id = ? WHERE id = ?", (target_id, uc[0]))
-        await db.commit()
-    card_name = card[0] if card else f"#{card_id}"
-    card_rarity = RARITY_STARS.get(card[1], "⭐") if card else "⭐"
-    await m.answer(f"🎁 <b>Подарок!</b>\n\n{card_rarity} <b>{card_name}</b> → <b>{target[0]}</b>", parse_mode=ParseMode.HTML)
 
 
 # =============================================================================
@@ -2209,7 +2252,7 @@ async def cards_page_cb(c: CallbackQuery):
 # =============================================================================
 @dp.message(Command("rig"))
 async def rig_cmd(m: Message):
-    if not await is_any_admin(m.from_user.id):
+    if m.from_user.id != ADMIN_ID:
         return
     global rig_mode, rig_remaining
     args = (m.text or "").split()
@@ -2235,7 +2278,7 @@ async def rig_cmd(m: Message):
 # =============================================================================
 @dp.message(Command("delcard"))
 async def delcard_cmd(m: Message):
-    if not await is_any_admin(m.from_user.id):
+    if m.from_user.id != ADMIN_ID:
         return
     args = (m.text or "").split()
     if len(args) < 2:
@@ -2311,7 +2354,7 @@ async def dropcard_cmd(m: Message):
 @dp.message(Command("cleancards"))
 async def cleancards_cmd(m: Message):
     """Удалить все карты из БД у которых нет картинки (image_id пустой)."""
-    if not await is_any_admin(m.from_user.id):
+    if m.from_user.id != ADMIN_ID:
         return
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT card_id, name, rarity, image_id FROM cards")
@@ -2319,7 +2362,7 @@ async def cleancards_cmd(m: Message):
         removed = []
         for card in all_cards:
             card_id, name, rarity, image_id = card
-            if not image_id or image_id.strip() == "":
+            if not image_id or str(image_id).strip() in ("", "None", "null", "0"):
                 # Удаляем карту из базы и у всех игроков
                 await db.execute("DELETE FROM user_cards WHERE card_id = ?", (card_id,))
                 await db.execute("DELETE FROM cards WHERE card_id = ?", (card_id,))
@@ -2420,7 +2463,21 @@ async def listadmins_cmd(m: Message):
 # =============================================================================
 #  ADMIN PANEL
 # =============================================================================
-def admin_main_kb() -> InlineKeyboardMarkup:
+def limited_admin_kb() -> InlineKeyboardMarkup:
+    """Меню для ограниченных админов."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Игроки", callback_data="adm_players")],
+        [InlineKeyboardButton(text="🎁 Промокоды", callback_data="adm_promo"),
+         InlineKeyboardButton(text="🃏 Карты (добавить)", callback_data="adm_cards_limited")],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats")],
+        [InlineKeyboardButton(text="🔍 Просмотр игрока", callback_data="adm_lookup"),
+         InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
+        [InlineKeyboardButton(text="✏️ Сменить ник", callback_data="adm_set_nickname")],
+    ])
+
+
+def full_admin_kb() -> InlineKeyboardMarkup:
+    """Меню для полноценных ограниченных админов (все права кроме управления админами)."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="👥 Игроки", callback_data="adm_players")],
         [InlineKeyboardButton(text="🎁 Промокоды", callback_data="adm_promo"),
@@ -2437,6 +2494,25 @@ def admin_main_kb() -> InlineKeyboardMarkup:
     ])
 
 
+def admin_main_kb() -> InlineKeyboardMarkup:
+    """Меню главного админа (все права + управление админами)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Игроки", callback_data="adm_players")],
+        [InlineKeyboardButton(text="🎁 Промокоды", callback_data="adm_promo"),
+         InlineKeyboardButton(text="🃏 Карты", callback_data="adm_cards")],
+        [InlineKeyboardButton(text="🎰 Игры & Подкрутка", callback_data="adm_games"),
+         InlineKeyboardButton(text="📊 Статистика", callback_data="adm_stats")],
+        [InlineKeyboardButton(text="💬 /me разрешения", callback_data="adm_me_perms")],
+        [InlineKeyboardButton(text="🔍 Просмотр игрока", callback_data="adm_lookup"),
+         InlineKeyboardButton(text="📢 Рассылка", callback_data="adm_broadcast")],
+        [InlineKeyboardButton(text="✏️ Сменить ник", callback_data="adm_set_nickname")],
+        [InlineKeyboardButton(text="📦 Бэкап БД", callback_data="adm_backup"),
+         InlineKeyboardButton(text="🔄 Откат БД", callback_data="adm_rollback")],
+        [InlineKeyboardButton(text="📥 Восстановить БД", callback_data="adm_restore")],
+        [InlineKeyboardButton(text="👤 Управление админами", callback_data="adm_manage_admins")],
+    ])
+
+
 def admin_games_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎰 Подкрутка казино", callback_data="adm_rig")],
@@ -2446,17 +2522,37 @@ def admin_games_kb() -> InlineKeyboardMarkup:
 
 @dp.message(Command("admin"))
 async def admin_cmd(m: Message):
-    if not await is_any_admin(m.from_user.id):
+    uid = m.from_user.id
+    if uid == ADMIN_ID:
+        kb = admin_main_kb()
+        title = "👑 <b>АДМИН-ПАНЕЛЬ</b>"
+    elif await is_full_admin(uid):
+        kb = full_admin_kb()
+        title = "👑 <b>ПАНЕЛЬ АДМИНИСТРАТОРА</b>"
+    elif await is_limited_admin(uid):
+        kb = limited_admin_kb()
+        title = "🔧 <b>ПАНЕЛЬ АДМИНИСТРАТОРА</b>"
+    else:
         return
-    await m.answer("👑 <b>АДМИН-ПАНЕЛЬ</b>", reply_markup=admin_main_kb(), parse_mode=ParseMode.HTML)
+    await m.answer(title, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(F.data == "adm_back")
 async def admin_back_cb(c: CallbackQuery, state: FSMContext):
-    if not await is_any_admin(c.from_user.id):
+    uid = c.from_user.id
+    if uid == ADMIN_ID:
+        kb = admin_main_kb()
+        title = "👑 <b>АДМИН-ПАНЕЛЬ</b>"
+    elif await is_full_admin(uid):
+        kb = full_admin_kb()
+        title = "👑 <b>ПАНЕЛЬ АДМИНИСТРАТОРА</b>"
+    elif await is_limited_admin(uid):
+        kb = limited_admin_kb()
+        title = "🔧 <b>ПАНЕЛЬ АДМИНИСТРАТОРА</b>"
+    else:
         return
     await state.clear()
-    await safe_edit(c.message, "👑 <b>АДМИН-ПАНЕЛЬ</b>", admin_main_kb())
+    await safe_edit(c.message, title, kb)
     await c.answer()
 
 
@@ -2602,7 +2698,7 @@ async def adm_ban_cb(c: CallbackQuery, state: FSMContext):
     if not await is_any_admin(c.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_ban_id)
-    await safe_edit(c.message, "🚫 Введи ID игрока для бана:")
+    await safe_edit(c.message, "🚫 Ответь на сообщение игрока, или напиши @юзернейм / ID для бана:")
     await c.answer()
 
 
@@ -2610,17 +2706,17 @@ async def adm_ban_cb(c: CallbackQuery, state: FSMContext):
 async def process_ban(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    uid = parse_positive_int(m.text)
+    uid, name, _ = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — целое число!")
+        return await m.answer(name)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (uid,))
         await db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (uid,))
         await db.commit()
     BanCheckMiddleware._ban_cache[uid] = time.time()
     await state.clear()
-    await m.answer(f"🚫 Игрок <code>{uid}</code> забанен.", parse_mode=ParseMode.HTML)
+    await m.answer(f"🚫 Игрок <b>{name}</b> (<code>{uid}</code>) забанен.", parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(F.data == "adm_p_unban")
@@ -2628,7 +2724,7 @@ async def adm_unban_cb(c: CallbackQuery, state: FSMContext):
     if not await is_any_admin(c.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_unban_id)
-    await safe_edit(c.message, "✅ Введи ID игрока для разбана:")
+    await safe_edit(c.message, "✅ Ответь на сообщение игрока, или напиши @юзернейм / ID для разбана:")
     await c.answer()
 
 
@@ -2636,16 +2732,16 @@ async def adm_unban_cb(c: CallbackQuery, state: FSMContext):
 async def process_unban(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    uid = parse_positive_int(m.text)
+    uid, name, _ = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — целое число!")
+        return await m.answer(name)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (uid,))
         await db.commit()
     BanCheckMiddleware._ban_cache.pop(uid, None)
     await state.clear()
-    await m.answer(f"✅ Игрок <code>{uid}</code> разбанен.", parse_mode=ParseMode.HTML)
+    await m.answer(f"✅ Игрок <b>{name}</b> (<code>{uid}</code>) разбанен.", parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(F.data == "adm_p_wipe")
@@ -2653,7 +2749,7 @@ async def adm_wipe_cb(c: CallbackQuery, state: FSMContext):
     if not await is_any_admin(c.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_wipe_id)
-    await safe_edit(c.message, "🗑 Введи ID игрока для аннулирования:")
+    await safe_edit(c.message, "🗑 Ответь на сообщение игрока, или напиши @юзернейм / ID для аннулирования:")
     await c.answer()
 
 
@@ -2661,10 +2757,10 @@ async def adm_wipe_cb(c: CallbackQuery, state: FSMContext):
 async def process_wipe(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    uid = parse_positive_int(m.text)
+    uid, name, _ = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — целое число!")
+        return await m.answer(name)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET balance=0, bbc_balance=0, rank=0, title='', vip_until='', coin_multiplier=1.0, "
@@ -2676,7 +2772,7 @@ async def process_wipe(m: Message, state: FSMContext):
         await db.execute("DELETE FROM achievements WHERE user_id = ?", (uid,))
         await db.commit()
     await state.clear()
-    await m.answer(f"🗑 Аккаунт <code>{uid}</code> полностью аннулирован.", parse_mode=ParseMode.HTML)
+    await m.answer(f"🗑 Аккаунт <b>{name}</b> (<code>{uid}</code>) полностью аннулирован.", parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(F.data == "adm_p_myth")
@@ -2684,7 +2780,7 @@ async def adm_myth_cb(c: CallbackQuery, state: FSMContext):
     if not await is_any_admin(c.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_myth_id)
-    await safe_edit(c.message, "🔱 Введи ID игрока для выдачи Мифрила:")
+    await safe_edit(c.message, "🔱 Ответь на сообщение игрока, или напиши @юзернейм / ID для выдачи Мифрила:")
     await c.answer()
 
 
@@ -2692,15 +2788,15 @@ async def adm_myth_cb(c: CallbackQuery, state: FSMContext):
 async def process_myth(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    uid = parse_positive_int(m.text)
+    uid, name, _ = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — целое число!")
+        return await m.answer(name)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET rank = 7 WHERE user_id = ?", (uid,))
         await db.commit()
     await state.clear()
-    await m.answer(f"🔱 Игроку <code>{uid}</code> выдан ранг Мифрил.", parse_mode=ParseMode.HTML)
+    await m.answer(f"🔱 Игроку <b>{name}</b> (<code>{uid}</code>) выдан ранг Мифрил.", parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(F.data == "adm_p_demyth")
@@ -2708,7 +2804,7 @@ async def adm_demyth_cb(c: CallbackQuery, state: FSMContext):
     if not await is_any_admin(c.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_demyth_id)
-    await safe_edit(c.message, "⬇️ Введи ID игрока для снятия Мифрила:")
+    await safe_edit(c.message, "⬇️ Ответь на сообщение игрока, или напиши @юзернейм / ID для снятия Мифрила:")
     await c.answer()
 
 
@@ -2716,10 +2812,10 @@ async def adm_demyth_cb(c: CallbackQuery, state: FSMContext):
 async def process_demyth(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    uid = parse_positive_int(m.text)
+    uid, name, _ = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — целое число!")
+        return await m.answer(name)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT rank FROM users WHERE user_id = ?", (uid,))
         row = await cur.fetchone()
@@ -2732,7 +2828,7 @@ async def process_demyth(m: Message, state: FSMContext):
         await db.execute("UPDATE users SET rank = 0 WHERE user_id = ?", (uid,))
         await db.commit()
     await state.clear()
-    await m.answer(f"⬇️ Ранг Мифрил снят с <code>{uid}</code>.", parse_mode=ParseMode.HTML)
+    await m.answer(f"⬇️ Ранг Мифрил снят с <b>{name}</b> (<code>{uid}</code>).", parse_mode=ParseMode.HTML)
 
 
 # =============================================================================
@@ -2744,11 +2840,10 @@ async def adm_econ_cb(c: CallbackQuery, state: FSMContext):
         return
     await state.set_state(AdminStates.waiting_for_econ_data)
     await safe_edit(c.message,
-        "💰 <b>Управление экономикой</b>\n\nФормат: <code>ТИП ID СУММА</code>\n\n"
-        "Типы:\n• <code>+coins ID СУММА</code> — выдать монеты\n"
-        "• <code>-coins ID СУММА</code> — снять монеты\n"
-        "• <code>+bbc ID СУММА</code> — выдать BBC\n"
-        "• <code>-bbc ID СУММА</code> — снять BBC")
+        "💰 <b>Управление экономикой</b>\n\n"
+        "Ответь на сообщение: <code>+coins 500</code>\n"
+        "Или: <code>+coins @юзер 500</code> / <code>+coins ID 500</code>\n\n"
+        "Типы: <code>+coins</code> <code>-coins</code> <code>+bbc</code> <code>-bbc</code>")
     await c.answer()
 
 
@@ -2756,16 +2851,49 @@ async def adm_econ_cb(c: CallbackQuery, state: FSMContext):
 async def process_econ(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    args = (m.text or "").split()
-    if len(args) != 3:
+    text = (m.text or "").strip()
+    args = text.split()
+    # Determine op (always first word)
+    if not args or args[0] not in ("+coins", "-coins", "+bbc", "-bbc"):
         await state.clear()
-        return await m.answer("❌ Формат: ТИП ID СУММА")
+        return await m.answer("❌ Начни с типа: +coins / -coins / +bbc / -bbc")
     op = args[0]
-    uid = parse_positive_int(args[1])
-    val = parse_positive_int(args[2])
-    if not uid or not val:
+    rest_after_op = text[len(op):].strip()
+    # If reply: rest_after_op = "AMOUNT"
+    if m.reply_to_message and m.reply_to_message.from_user:
+        ru = m.reply_to_message.from_user
+        uid, name = ru.id, ru.full_name
+        val = parse_positive_int(rest_after_op.split()[0] if rest_after_op.split() else "")
+    else:
+        # Parse user from rest_after_op
+        # Create a fake context to reuse resolve_user logic inline
+        inner_parts = rest_after_op.split(maxsplit=1)
+        if not inner_parts:
+            await state.clear()
+            return await m.answer("❌ Укажи пользователя и сумму")
+        # Check for @username or numeric ID
+        token = inner_parts[0]
+        amount_str = inner_parts[1] if len(inner_parts) > 1 else ""
+        if token.startswith("@"):
+            uname = token.lstrip("@")
+            async with aiosqlite.connect(DB_PATH) as db2:
+                cur2 = await db2.execute(
+                    "SELECT user_id, nickname FROM users WHERE LOWER(username) = LOWER(?)", (uname,))
+                row2 = await cur2.fetchone()
+            if not row2:
+                await state.clear()
+                return await m.answer(f"❌ Игрок @{uname} не найден в базе!")
+            uid, name = row2[0], row2[1] or f"@{uname}"
+        else:
+            uid = parse_positive_int(token)
+            name = str(uid) if uid else None
+            if not uid:
+                await state.clear()
+                return await m.answer("❌ Укажи @юзернейм или ID после типа операции")
+        val = parse_positive_int(amount_str.split()[0] if amount_str.split() else "")
+    if not val:
         await state.clear()
-        return await m.answer("❌ ID и сумма — целые числа > 0!")
+        return await m.answer("❌ Сумма — целое число > 0!")
     async with aiosqlite.connect(DB_PATH) as db:
         if op == "+coins":
             await db.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (val, uid))
@@ -2779,12 +2907,9 @@ async def process_econ(m: Message, state: FSMContext):
         elif op == "-bbc":
             await db.execute("UPDATE users SET bbc_balance = MAX(0, bbc_balance - ?) WHERE user_id = ?", (val, uid))
             action = f"-{val} BBC"
-        else:
-            await state.clear()
-            return await m.answer("❌ Тип: +coins, -coins, +bbc, -bbc")
         await db.commit()
     await state.clear()
-    await m.answer(f"✅ Игрок <code>{uid}</code>: {action}", parse_mode=ParseMode.HTML)
+    await m.answer(f"✅ <b>{name}</b> (<code>{uid}</code>): {action}", parse_mode=ParseMode.HTML)
 
 
 # =============================================================================
@@ -2827,6 +2952,18 @@ async def process_card_rarity(m: Message, state: FSMContext):
 # =============================================================================
 #  ADMIN: Rig (full admin only)
 # =============================================================================
+@dp.callback_query(F.data == "adm_cards_limited")
+async def adm_cards_limited_cb(c: CallbackQuery):
+    if not await is_limited_admin(c.from_user.id):
+        return await c.answer("❌ Нет доступа!", show_alert=True)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Добавить карту", callback_data="adm_card_add")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="adm_back")],
+    ])
+    await safe_edit(c.message, "🃏 <b>Карты</b>\n\nДоступные действия:", kb)
+    await c.answer()
+
+
 @dp.callback_query(F.data == "adm_games")
 async def adm_games_cb(c: CallbackQuery):
     if c.from_user.id != ADMIN_ID:
@@ -2892,7 +3029,7 @@ async def adm_lookup_cb(c: CallbackQuery, state: FSMContext):
     if not await is_any_admin(c.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_lookup_id)
-    await safe_edit(c.message, "🔍 Введи ID игрока:")
+    await safe_edit(c.message, "🔍 Ответь на сообщение игрока, или напиши @юзернейм / ID:")
     await c.answer()
 
 
@@ -2900,10 +3037,10 @@ async def adm_lookup_cb(c: CallbackQuery, state: FSMContext):
 async def process_lookup(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    uid = parse_positive_int(m.text)
+    uid, name, _ = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — целое число!")
+        return await m.answer(name)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT nickname, balance, bbc_balance, rank, title, "
@@ -2971,8 +3108,11 @@ async def adm_set_title_cb(c: CallbackQuery, state: FSMContext):
         return
     await state.set_state(AdminStates.waiting_for_set_title_id)
     await safe_edit(c.message,
-        "📝 <b>Задать титул</b>\n\nВведи: <code>ID ТИТУЛ</code>\n"
-        "Пример: <code>123456 🔥 Огненный</code>\nДля удаления: <code>ID -</code>")
+        "📝 <b>Задать титул</b>\n\nФорматы:\n"
+        "• Ответь на сообщение игрока + напиши <code>ТИТУЛ</code>\n"
+        "• <code>@юзернейм ТИТУЛ</code>\n"
+        "• <code>ID ТИТУЛ</code>\n"
+        "Для удаления: <code>-</code> вместо титула")
     await c.answer()
 
 
@@ -2980,20 +3120,19 @@ async def adm_set_title_cb(c: CallbackQuery, state: FSMContext):
 async def process_set_title(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    parts = (m.text or "").split(maxsplit=1)
-    if len(parts) < 2:
-        await state.clear()
-        return await m.answer("❌ Формат: ID ТИТУЛ")
-    uid = parse_positive_int(parts[0])
+    uid, name, rest = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — число!")
-    title = "" if parts[1].strip() == "-" else parts[1].strip()
+        return await m.answer(name)
+    if not rest:
+        await state.clear()
+        return await m.answer("❌ Укажи титул после пользователя (или - для удаления)")
+    title = "" if rest.strip() == "-" else rest.strip()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET title = ? WHERE user_id = ?", (title, uid))
         await db.commit()
     await state.clear()
-    res = f"📝 Титул <code>{uid}</code> → <b>{title}</b>" if title else f"📝 Титул <code>{uid}</code> убран"
+    res = f"📝 Титул <b>{name}</b> → <b>{title}</b>" if title else f"📝 Титул <b>{name}</b> убран"
     await m.answer(res, parse_mode=ParseMode.HTML)
 
 
@@ -3005,7 +3144,7 @@ async def adm_reset_cd_cb(c: CallbackQuery, state: FSMContext):
     if not await is_any_admin(c.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_reset_cd_id)
-    await safe_edit(c.message, "🔄 Введи ID игрока для полного сброса всех КД:")
+    await safe_edit(c.message, "🔄 Ответь на сообщение игрока, или напиши @юзернейм / ID для сброса КД:")
     await c.answer()
 
 
@@ -3013,16 +3152,16 @@ async def adm_reset_cd_cb(c: CallbackQuery, state: FSMContext):
 async def process_reset_cd(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    uid = parse_positive_int(m.text)
+    uid, name, _ = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — число!")
+        return await m.answer(name)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE users SET last_daily='', last_gacha='', last_rob='' WHERE user_id = ?", (uid,))
         await db.commit()
     await state.clear()
-    await m.answer(f"🔄 Все КД сброшены для <code>{uid}</code>.", parse_mode=ParseMode.HTML)
+    await m.answer(f"🔄 Все КД сброшены для <b>{name}</b> (<code>{uid}</code>).", parse_mode=ParseMode.HTML)
 
 
 # =============================================================================
@@ -3033,7 +3172,10 @@ async def adm_set_level_cb(c: CallbackQuery, state: FSMContext):
     if not await is_any_admin(c.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_set_level_data)
-    await safe_edit(c.message, "⚡ <b>Задать уровень</b>\n\nФормат: <code>USER_ID УРОВЕНЬ</code>\nXP пересчитается автоматически.")
+    await safe_edit(c.message, "⚡ <b>Задать уровень</b>\n\nФорматы:\n"
+        "• Ответь на сообщение игрока + <code>УРОВЕНЬ</code>\n"
+        "• <code>@юзернейм УРОВЕНЬ</code>\n"
+        "• <code>ID УРОВЕНЬ</code>")
     await c.answer()
 
 
@@ -3041,21 +3183,20 @@ async def adm_set_level_cb(c: CallbackQuery, state: FSMContext):
 async def process_set_level(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    args = (m.text or "").split()
-    if len(args) != 2:
+    uid, name, rest = await resolve_user(m)
+    if not uid:
         await state.clear()
-        return await m.answer("❌ Формат: USER_ID УРОВЕНЬ")
-    uid = parse_positive_int(args[0])
-    lvl = parse_positive_int(args[1])
-    if not uid or not lvl:
+        return await m.answer(name)
+    lvl = parse_positive_int(rest.split()[0] if rest.split() else "")
+    if not lvl:
         await state.clear()
-        return await m.answer("❌ Оба — числа > 0!")
+        return await m.answer("❌ Укажи уровень (число > 0)")
     xp_needed = sum(xp_for_level(i) for i in range(1, lvl))
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET level = ?, xp = ? WHERE user_id = ?", (lvl, xp_needed, uid))
         await db.commit()
     await state.clear()
-    await m.answer(f"⚡ Игрок <code>{uid}</code>: уровень → {lvl} (XP: {xp_needed:,})", parse_mode=ParseMode.HTML)
+    await m.answer(f"⚡ <b>{name}</b> (<code>{uid}</code>): уровень → {lvl} (XP: {xp_needed:,})", parse_mode=ParseMode.HTML)
 
 
 # =============================================================================
@@ -3066,7 +3207,7 @@ async def adm_freeze_cb(c: CallbackQuery, state: FSMContext):
     if not await is_any_admin(c.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_freeze_id)
-    await safe_edit(c.message, "🥶 Введи ID игрока для заморозки (не сможет играть):")
+    await safe_edit(c.message, "🥶 Ответь на сообщение игрока, или напиши @юзернейм / ID для заморозки:")
     await c.answer()
 
 
@@ -3074,15 +3215,15 @@ async def adm_freeze_cb(c: CallbackQuery, state: FSMContext):
 async def process_freeze(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    uid = parse_positive_int(m.text)
+    uid, name, _ = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — число!")
+        return await m.answer(name)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET is_frozen = 1 WHERE user_id = ?", (uid,))
         await db.commit()
     await state.clear()
-    await m.answer(f"🥶 Игрок <code>{uid}</code> заморожен.", parse_mode=ParseMode.HTML)
+    await m.answer(f"🥶 Игрок <b>{name}</b> (<code>{uid}</code>) заморожен.", parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(F.data == "adm_unfreeze")
@@ -3090,7 +3231,7 @@ async def adm_unfreeze_cb(c: CallbackQuery, state: FSMContext):
     if not await is_any_admin(c.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_unfreeze_id)
-    await safe_edit(c.message, "☀️ Введи ID игрока для разморозки:")
+    await safe_edit(c.message, "☀️ Ответь на сообщение игрока, или напиши @юзернейм / ID для разморозки:")
     await c.answer()
 
 
@@ -3098,15 +3239,15 @@ async def adm_unfreeze_cb(c: CallbackQuery, state: FSMContext):
 async def process_unfreeze(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    uid = parse_positive_int(m.text)
+    uid, name, _ = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — число!")
+        return await m.answer(name)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET is_frozen = 0 WHERE user_id = ?", (uid,))
         await db.commit()
     await state.clear()
-    await m.answer(f"☀️ Игрок <code>{uid}</code> разморожен.", parse_mode=ParseMode.HTML)
+    await m.answer(f"☀️ Игрок <b>{name}</b> (<code>{uid}</code>) разморожен.", parse_mode=ParseMode.HTML)
 
 
 # =============================================================================
@@ -3118,8 +3259,10 @@ async def adm_set_balance_cb(c: CallbackQuery, state: FSMContext):
         return
     await state.set_state(AdminStates.waiting_for_set_balance_data)
     await safe_edit(c.message,
-        "💰 <b>Задать точный баланс</b>\n\nФормат: <code>USER_ID ТИП СУММА</code>\n"
-        "Типы: coins, bbc\nПример: <code>123456 coins 50000</code>")
+        "💰 <b>Задать точный баланс</b>\n\nФорматы:\n"
+        "• Ответь на сообщение + <code>coins/bbc СУММА</code>\n"
+        "• <code>@юзернейм coins СУММА</code>\n"
+        "• <code>ID coins СУММА</code>")
     await c.answer()
 
 
@@ -3127,21 +3270,24 @@ async def adm_set_balance_cb(c: CallbackQuery, state: FSMContext):
 async def process_set_balance(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    args = (m.text or "").split()
-    if len(args) != 3 or args[1] not in ("coins", "bbc"):
+    uid, name, rest = await resolve_user(m)
+    if not uid:
         await state.clear()
-        return await m.answer("❌ Формат: USER_ID coins/bbc СУММА")
-    uid = parse_positive_int(args[0])
-    val = parse_positive_int(args[2])
-    if not uid or val is None:
+        return await m.answer(name)
+    rargs = rest.split()
+    if len(rargs) != 2 or rargs[0] not in ("coins", "bbc"):
         await state.clear()
-        return await m.answer("❌ ID и сумма — числа > 0!")
-    col = "balance" if args[1] == "coins" else "bbc_balance"
+        return await m.answer("❌ После пользователя укажи: <code>coins/bbc СУММА</code>", parse_mode=ParseMode.HTML)
+    val = parse_positive_int(rargs[1])
+    if val is None:
+        await state.clear()
+        return await m.answer("❌ Сумма — число > 0!")
+    col = "balance" if rargs[0] == "coins" else "bbc_balance"
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(f"UPDATE users SET {col} = ? WHERE user_id = ?", (val, uid))
         await db.commit()
     await state.clear()
-    await m.answer(f"💰 Баланс <code>{uid}</code>: {args[1]} = {val:,}", parse_mode=ParseMode.HTML)
+    await m.answer(f"💰 Баланс <b>{name}</b>: {rargs[0]} = {val:,}", parse_mode=ParseMode.HTML)
 
 
 # =============================================================================
@@ -3152,7 +3298,10 @@ async def adm_set_nickname_cb(c: CallbackQuery, state: FSMContext):
     if not await is_any_admin(c.from_user.id):
         return
     await state.set_state(AdminStates.waiting_for_nickname_data)
-    await safe_edit(c.message, "✏️ <b>Сменить ник</b>\n\nФормат: <code>USER_ID НОВЫЙ_НИК</code>")
+    await safe_edit(c.message, "✏️ <b>Сменить ник</b>\n\nФорматы:\n"
+        "• Ответь на сообщение + новый ник\n"
+        "• <code>@юзернейм НИК</code>\n"
+        "• <code>ID НИК</code>")
     await c.answer()
 
 
@@ -3160,20 +3309,19 @@ async def adm_set_nickname_cb(c: CallbackQuery, state: FSMContext):
 async def process_set_nickname(m: Message, state: FSMContext):
     if not await is_any_admin(m.from_user.id):
         return
-    parts = (m.text or "").split(maxsplit=1)
-    if len(parts) < 2:
-        await state.clear()
-        return await m.answer("❌ Формат: USER_ID НИК")
-    uid = parse_positive_int(parts[0])
+    uid, name, rest = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — число!")
-    nick = parts[1].strip()[:50]
+        return await m.answer(name)
+    if not rest.strip():
+        await state.clear()
+        return await m.answer("❌ Укажи новый ник после пользователя")
+    nick = rest.strip()[:50]
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET nickname = ? WHERE user_id = ?", (nick, uid))
         await db.commit()
     await state.clear()
-    await m.answer(f"✏️ Ник <code>{uid}</code> → <b>{nick}</b>", parse_mode=ParseMode.HTML)
+    await m.answer(f"✏️ Ник <b>{name}</b> (<code>{uid}</code>) → <b>{nick}</b>", parse_mode=ParseMode.HTML)
 
 
 # =============================================================================
@@ -3317,7 +3465,6 @@ async def marry_cmd(m: Message):
         return await m.answer("❌ Нельзя жениться на себе!")
     if target.is_bot:
         return await m.answer("❌ Нельзя жениться на боте!")
-    chat_id = m.chat.id
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_social_tables(db)
         c1 = await db.execute("SELECT nickname FROM users WHERE user_id=?", (m.from_user.id,))
@@ -3476,7 +3623,7 @@ async def top_pairs_cb(c: CallbackQuery):
 
 
 # =============================================================================
-#  /me ACTIONS
+#  ME ACTIONS (авто-определение)
 # =============================================================================
 async def _has_me_permission(user_id: int) -> bool:
     if user_id == ADMIN_ID:
@@ -3487,30 +3634,16 @@ async def _has_me_permission(user_id: int) -> bool:
         return bool(await cur.fetchone())
 
 
-@dp.message(Command("me"))
-async def me_cmd(m: Message):
-    if not await _has_me_permission(m.from_user.id):
-        return await m.answer("❌ У тебя нет разрешения на /me команды!")
+@dp.message(lambda m: m.text and m.text.strip().lower() in ME_ACTIONS)
+async def me_auto_cmd(m: Message):
     if not m.reply_to_message or not m.reply_to_message.from_user:
-        return await m.answer(
-            "💬 <b>Использование:</b> ответь на сообщение и напиши:\n<code>/me обнял</code>\n"
-            "<code>/me поцеловал</code>\n<code>/me шлепнул</code>\n<code>/me ударил</code>\n"
-            "<code>/me посмеялся</code>\n<code>/me принудил</code>\n<code>/me трахнул</code>",
-            parse_mode=ParseMode.HTML)
+        return
+    if not await _has_me_permission(m.from_user.id):
+        return
     target = m.reply_to_message.from_user
     if target.id == m.from_user.id:
-        return await m.answer("❌ Нельзя применить к себе!")
-    args = (m.text or "").split(maxsplit=1)
-    if len(args) < 2:
-        return await m.answer("❌ Укажи действие: /me <действие>")
-    action_raw = args[1].strip().lower()
-    matched_action = None
-    for key in ME_ACTIONS:
-        if action_raw.startswith(key):
-            matched_action = key
-            break
-    if not matched_action:
-        return await m.answer(f"❌ Неизвестное действие!\nДоступно: {', '.join(ME_ACTIONS.keys())}")
+        return
+    matched_action = m.text.strip().lower()
     async with aiosqlite.connect(DB_PATH) as db:
         c1 = await db.execute("SELECT nickname FROM users WHERE user_id=?", (m.from_user.id,))
         c2 = await db.execute("SELECT nickname FROM users WHERE user_id=?", (target.id,))
@@ -3559,7 +3692,7 @@ async def adm_me_grant_cb(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
         return
     await state.set_state(AdminMeStates.waiting_for_me_grant)
-    await safe_edit(c.message, "✅ Введи ID пользователя для выдачи разрешения /me:")
+    await safe_edit(c.message, "✅ Ответь на сообщение, или напиши @юзернейм / ID для выдачи /me:")
     await c.answer()
 
 
@@ -3567,21 +3700,21 @@ async def adm_me_grant_cb(c: CallbackQuery, state: FSMContext):
 async def process_me_grant(m: Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
         return
-    uid = parse_positive_int(m.text)
+    uid, name, _ = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — целое число!")
+        return await m.answer(name)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT nickname FROM users WHERE user_id=?", (uid,))
         row = await cur.fetchone()
         if not row:
             await state.clear()
-            return await m.answer("❌ Игрок не найден!")
+            return await m.answer("❌ Игрок не найден в базе!")
         await db.execute("INSERT OR REPLACE INTO me_permissions (user_id, granted_by, granted_at) VALUES (?,?,?)",
                          (uid, ADMIN_ID, datetime.now().isoformat()))
         await db.commit()
     await state.clear()
-    await m.answer(f"✅ Разрешение /me выдано игроку <b>{row[0]}</b> (<code>{uid}</code>)", parse_mode=ParseMode.HTML)
+    await m.answer(f"✅ Разрешение /me выдано игроку <b>{name}</b> (<code>{uid}</code>)", parse_mode=ParseMode.HTML)
 
 
 @dp.callback_query(F.data == "adm_me_revoke")
@@ -3589,7 +3722,7 @@ async def adm_me_revoke_cb(c: CallbackQuery, state: FSMContext):
     if c.from_user.id != ADMIN_ID:
         return
     await state.set_state(AdminMeStates.waiting_for_me_revoke)
-    await safe_edit(c.message, "❌ Введи ID пользователя для отзыва разрешения /me:")
+    await safe_edit(c.message, "❌ Ответь на сообщение, или напиши @юзернейм / ID для отзыва /me:")
     await c.answer()
 
 
@@ -3597,10 +3730,10 @@ async def adm_me_revoke_cb(c: CallbackQuery, state: FSMContext):
 async def process_me_revoke(m: Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
         return
-    uid = parse_positive_int(m.text)
+    uid, name, _ = await resolve_user(m)
     if not uid:
         await state.clear()
-        return await m.answer("❌ ID — целое число!")
+        return await m.answer(name)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT user_id FROM me_permissions WHERE user_id=?", (uid,))
         if not await cur.fetchone():
@@ -3609,7 +3742,7 @@ async def process_me_revoke(m: Message, state: FSMContext):
         await db.execute("DELETE FROM me_permissions WHERE user_id=?", (uid,))
         await db.commit()
     await state.clear()
-    await m.answer(f"❌ Разрешение /me отозвано у <code>{uid}</code>", parse_mode=ParseMode.HTML)
+    await m.answer(f"❌ Разрешение /me отозвано у <b>{name}</b> (<code>{uid}</code>)", parse_mode=ParseMode.HTML)
 
 
 # =============================================================================
@@ -3782,10 +3915,169 @@ async def health_server():
 
 async def main():
     await init_db()
+
+    # Автоматически удаляем карты без картинок при запуске
+    async with aiosqlite.connect(DB_PATH) as _db:
+        _cur = await _db.execute(
+            "SELECT card_id FROM cards WHERE image_id IS NULL OR TRIM(image_id) = '' "
+            "OR TRIM(image_id) IN ('None', 'null', '0')")
+        _bad = await _cur.fetchall()
+        if _bad:
+            _ids = [r[0] for r in _bad]
+            await _db.execute(f"DELETE FROM user_cards WHERE card_id IN ({','.join('?'*len(_ids))})", _ids)
+            await _db.execute(f"DELETE FROM cards WHERE card_id IN ({','.join('?'*len(_ids))})", _ids)
+            await _db.commit()
+            log.info(f"🧹 Автоочистка: удалено {len(_ids)} карт без картинки")
+
     await bot.delete_webhook(drop_pending_updates=True)
     log.info("Bot started!")
     await asyncio.gather(health_server(), dp.start_polling(bot))
 
+
+
+# =============================================================================
+#  УПРАВЛЕНИЕ АДМИНАМИ (только ADMIN_ID)
+# =============================================================================
+
+@dp.callback_query(F.data == "adm_manage_admins")
+async def adm_manage_admins_cb(c: CallbackQuery):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Только главный админ!", show_alert=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_social_tables(db)
+        cur = await db.execute(
+            "SELECT la.user_id, u.nickname, la.is_full FROM limited_admins la "
+            "LEFT JOIN users u ON la.user_id = u.user_id ORDER BY la.is_full DESC, u.nickname"
+        )
+        admins = await cur.fetchall()
+    if not admins:
+        text = "👤 <b>Управление Админами</b>\n\nАдминов пока нет."
+    else:
+        lines = []
+        for uid, nick, is_full in admins:
+            badge = "⭐ Полный" if is_full else "🔧 Ограниченный"
+            lines.append(f"  {badge} | {nick or '???'} (<code>{uid}</code>)")
+        text = "👤 <b>Управление Админами</b>\n\n" + "\n".join(lines) + "\n\n<i>⬆️ — повысить до полного | ⬇️ — снизить | 🗑 — удалить</i>"
+
+    buttons = []
+    for uid, nick, is_full in (admins or []):
+        name = nick or str(uid)
+        row_top = []
+        if is_full:
+            row_top.append(InlineKeyboardButton(
+                text=f"⬇️ Понизить {name}",
+                callback_data=f"adm_demote_{uid}"
+            ))
+        else:
+            row_top.append(InlineKeyboardButton(
+                text=f"⬆️ Повысить {name}",
+                callback_data=f"adm_promote_{uid}"
+            ))
+        row_top.append(InlineKeyboardButton(
+            text=f"🗑 Снять {name}",
+            callback_data=f"adm_remove_admin_{uid}"
+        ))
+        buttons.append(row_top)
+    buttons.append([InlineKeyboardButton(text="➕ Добавить админа", callback_data="adm_add_admin_start")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="adm_back")])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await safe_edit(c.message, text, kb)
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("adm_promote_"))
+async def adm_promote_cb(c: CallbackQuery):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Только главный админ!", show_alert=True)
+    try:
+        target_id = int(c.data.split("_")[2])
+    except (IndexError, ValueError):
+        return await c.answer("❌ Ошибка!", show_alert=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_social_tables(db)
+        await db.execute("UPDATE limited_admins SET is_full = 1 WHERE user_id = ?", (target_id,))
+        await db.commit()
+    await c.answer("✅ Повышен до полного админа!", show_alert=True)
+    await adm_manage_admins_cb(c)
+
+
+@dp.callback_query(F.data.startswith("adm_demote_"))
+async def adm_demote_cb(c: CallbackQuery):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Только главный админ!", show_alert=True)
+    try:
+        target_id = int(c.data.split("_")[2])
+    except (IndexError, ValueError):
+        return await c.answer("❌ Ошибка!", show_alert=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_social_tables(db)
+        await db.execute("UPDATE limited_admins SET is_full = 0 WHERE user_id = ?", (target_id,))
+        await db.commit()
+    await c.answer("✅ Понижен до ограниченного!", show_alert=True)
+    await adm_manage_admins_cb(c)
+
+
+@dp.callback_query(F.data.startswith("adm_remove_admin_"))
+async def adm_remove_admin_cb(c: CallbackQuery):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Только главный админ!", show_alert=True)
+    try:
+        target_id = int(c.data.split("_")[3])
+    except (IndexError, ValueError):
+        return await c.answer("❌ Ошибка при разборе ID!", show_alert=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_social_tables(db)
+        # Получаем ник перед удалением
+        nick_cur = await db.execute(
+            "SELECT u.nickname FROM limited_admins la LEFT JOIN users u ON la.user_id = u.user_id WHERE la.user_id = ?",
+            (target_id,)
+        )
+        nick_row = await nick_cur.fetchone()
+        nick = nick_row[0] if nick_row and nick_row[0] else str(target_id)
+        cur = await db.execute("DELETE FROM limited_admins WHERE user_id = ?", (target_id,))
+        await db.commit()
+        deleted = cur.rowcount
+    if deleted:
+        await c.answer(f"✅ {nick} снят с должности админа!", show_alert=True)
+    else:
+        await c.answer("❌ Такой админ не найден!", show_alert=True)
+    await adm_manage_admins_cb(c)
+
+
+class AdminManageStates(StatesGroup):
+    waiting_for_add_admin_id = State()
+
+
+@dp.callback_query(F.data == "adm_add_admin_start")
+async def adm_add_admin_start_cb(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("❌ Только главный админ!", show_alert=True)
+    await state.set_state(AdminManageStates.waiting_for_add_admin_id)
+    await safe_edit(c.message, "➕ <b>Добавить ограниченного админа</b>\n\nОтветь на сообщение игрока, или напиши @юзернейм / ID:")
+    await c.answer()
+
+
+@dp.message(AdminManageStates.waiting_for_add_admin_id)
+async def process_add_admin_id(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+    await state.clear()
+    uid, name, _ = await resolve_user(m)
+    if not uid:
+        return await m.answer(name)
+    if uid == ADMIN_ID:
+        return await m.answer("❌ Ты и так главный админ!")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await _ensure_social_tables(db)
+        cur = await db.execute("SELECT user_id FROM limited_admins WHERE user_id = ?", (uid,))
+        if await cur.fetchone():
+            return await m.answer(f"⚠️ <b>{name}</b> (<code>{uid}</code>) уже является ограниченным админом.", parse_mode=ParseMode.HTML)
+        await db.execute(
+            "INSERT INTO limited_admins (user_id, added_by, added_at, is_full) VALUES (?, ?, ?, 0)",
+            (uid, ADMIN_ID, datetime.now().isoformat())
+        )
+        await db.commit()
+    await m.answer(f"✅ <b>{name}</b> (<code>{uid}</code>) добавлен как ограниченный админ.", parse_mode=ParseMode.HTML)
 
 if __name__ == "__main__":
     asyncio.run(main())
