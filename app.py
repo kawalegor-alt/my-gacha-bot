@@ -1848,7 +1848,7 @@ async def top_coins_cb(c: CallbackQuery):
 async def top_cards_cb(c: CallbackQuery):
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "SELECT u.nickname, SUM(c.rarity) as score, COUNT(*) as cnt "
+            "SELECT COALESCE(u.nickname, 'User' || u.user_id), SUM(c.rarity) as score, COUNT(*) as cnt "
             "FROM user_cards uc JOIN users u ON uc.user_id = u.user_id "
             "JOIN cards c ON uc.card_id = c.card_id "
             "GROUP BY uc.user_id ORDER BY score DESC LIMIT 10")
@@ -1878,13 +1878,13 @@ async def top_cmd(m: Message):
         "coins": ("💰 ТОП ПО МОНЕТАМ", "SELECT nickname, balance FROM users ORDER BY balance DESC LIMIT 10",
                   lambda r: f"{r[0]}: {r[1]:,} 💰"),
         "cards": ("🃏 ТОП ПО КАРТАМ",
-                  "SELECT u.nickname, SUM(c.rarity) as score, COUNT(*) as cnt FROM user_cards uc JOIN users u ON uc.user_id = u.user_id JOIN cards c ON uc.card_id = c.card_id GROUP BY uc.user_id ORDER BY score DESC LIMIT 10",
+                  "SELECT COALESCE(u.nickname, 'User' || u.user_id), SUM(c.rarity) as score, COUNT(*) as cnt FROM user_cards uc JOIN users u ON uc.user_id = u.user_id JOIN cards c ON uc.card_id = c.card_id GROUP BY uc.user_id ORDER BY score DESC LIMIT 10",
                   lambda r: f"{r[0]}: {r[2]} карт (рейтинг: {r[1]})"),
         "levels": ("📊 ТОП ПО УРОВНЯМ",
                    "SELECT nickname, level, xp FROM users ORDER BY level DESC, xp DESC LIMIT 10",
                    lambda r: f"{r[0]}: Ур.{r[1]} ({level_title(r[1])})"),
         "pairs": ("💑 ТОП ПАР",
-                  "SELECT m.user1_id, m.user2_id, m.married_at, u1.nickname, u2.nickname FROM marriages m LEFT JOIN users u1 ON m.user1_id = u1.user_id LEFT JOIN users u2 ON m.user2_id = u2.user_id ORDER BY m.married_at ASC LIMIT 10",
+                  "SELECT m.user1_id, m.user2_id, m.married_at, COALESCE(u1.nickname, 'User' || m.user1_id), COALESCE(u2.nickname, 'User' || m.user2_id) FROM marriages m LEFT JOIN users u1 ON m.user1_id = u1.user_id LEFT JOIN users u2 ON m.user2_id = u2.user_id ORDER BY m.married_at ASC LIMIT 10",
                   lambda r: f"{r[3] or '???'} ❤️ {r[4] or '???'}"),
     }
     top_type = args[1].lower() if len(args) > 1 else "coins"
@@ -2107,7 +2107,7 @@ async def word_trigger_card(m: Message):
     text_out += "\n✨ +10 XP"
     if card[3]:
         try:
-            await bot.send_photo(m.chat.id, card[3], caption=text_out, parse_mode=ParseMode.HTML, reply_to_message_id=m.message_id)
+            await m.reply_photo(card[3], caption=text_out, parse_mode=ParseMode.HTML)
             return
         except Exception:
             pass
@@ -3597,7 +3597,7 @@ async def top_pairs_cb(c: CallbackQuery):
     async with aiosqlite.connect(DB_PATH) as db:
         await _ensure_social_tables(db)
         cur = await db.execute(
-            "SELECT m.user1_id, m.user2_id, m.married_at, u1.nickname, u2.nickname FROM marriages m "
+            "SELECT m.user1_id, m.user2_id, m.married_at, COALESCE(u1.nickname, 'User' || m.user1_id), COALESCE(u2.nickname, 'User' || m.user2_id) FROM marriages m "
             "LEFT JOIN users u1 ON m.user1_id = u1.user_id LEFT JOIN users u2 ON m.user2_id = u2.user_id "
             "ORDER BY m.married_at ASC LIMIT 10")
         rows = await cur.fetchall()
