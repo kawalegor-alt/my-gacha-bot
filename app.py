@@ -2314,36 +2314,100 @@ async def sss_reset_cd_cmd(m: Message):
 # =============================================================================
 @dp.message(Command("fixcards"))
 async def fixcards_cmd(m: Message):
-    """Перезаливает все аватарные file_id (profile-photo тип) через send→delete,
-       чтобы получить нормальные переиспользуемые file_id."""
+    """
+    1. Скачивает и перезаливает каждое фото → получает нормальный file_id.
+    2. Карты, которые не удалось починить — удаляет из cards, user_cards, auctions.
+    3. Перенумеровывает все оставшиеся карты последовательно (1, 2, 3...).
+    """
     if m.from_user.id != ADMIN_ID:
         return
-    status_msg = await m.answer("🔧 Начинаю починку карт... это может занять время.")
+    from aiogram.types import BufferedInputFile
+    status_msg = await m.answer("🔧 Шаг 1/3: Чиню картинки карт...")
     fixed = 0
-    failed = 0
+    skipped = 0
+    deleted_ids = []
+
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT card_id, name, image_id FROM cards WHERE image_id IS NOT NULL AND TRIM(image_id) != ''")
+        cur = await db.execute(
+            "SELECT card_id, name, image_id FROM cards "
+            "WHERE image_id IS NOT NULL AND TRIM(image_id) != ''")
         cards = await cur.fetchall()
-        for card_id, name, image_id in cards:
-            # Аватарные file_id от get_user_profile_photos начинаются с AgACAgIAAxUAA
-            # Обычные фото из сообщений — AgACAgIAAxkB
-            # Пробуем переслать каждую, у которой prefix не xkB (т.е. подозрительная)
-            if "AxUAA" in image_id or "AxkBAAI" not in image_id:
-                try:
-                    sent_msg = await m.bot.send_photo(ADMIN_ID, image_id)
-                    new_file_id = sent_msg.photo[-1].file_id
-                    await sent_msg.delete()
-                    await db.execute("UPDATE cards SET image_id = ? WHERE card_id = ?", (new_file_id, card_id))
+        total = len(cards)
+
+        # ── Шаг 1: починка / удаление ──────────────────────────────────────
+        for i, (card_id, name, image_id) in enumerate(cards):
+            try:
+                tg_file = await m.bot.get_file(image_id)
+                file_bytes = await m.bot.download_file(tg_file.file_path)
+                data = file_bytes.read() if hasattr(file_bytes, "read") else bytes(file_bytes)
+                sent_msg = await m.bot.send_photo(
+                    ADMIN_ID,
+                    BufferedInputFile(data, filename=f"card_{card_id}.jpg"))
+                new_file_id = sent_msg.photo[-1].file_id
+                await sent_msg.delete()
+                if new_file_id != image_id:
+                    await db.execute(
+                        "UPDATE cards SET image_id = ? WHERE card_id = ?",
+                        (new_file_id, card_id))
                     fixed += 1
-                    await asyncio.sleep(0.3)  # не спамим API
-                except Exception as e:
-                    log.warning(f"fixcards: card {card_id} ({name}) failed: {e}")
-                    failed += 1
+                else:
+                    skipped += 1
+                await asyncio.sleep(0.3)
+            except Exception as e:
+                log.warning(f"fixcards: card {card_id} ({name}) — удаляю: {e}")
+                deleted_ids.append(card_id)
+
+            if (i + 1) % 10 == 0:
+                try:
+                    await status_msg.edit_text(f"🔧 Шаг 1/3: Обработано {i+1}/{total}...")
+                except Exception:
+                    pass
+
+        # Удаляем сломанные карты из всех таблиц
+        if deleted_ids:
+            await status_msg.edit_text(f"🗑 Шаг 2/3: Удаляю {len(deleted_ids)} сломанных карт...")
+            for cid in deleted_ids:
+                await db.execute("DELETE FROM user_cards WHERE card_id = ?", (cid,))
+                await db.execute("DELETE FROM auctions WHERE card_id = ?", (cid,))
+                await db.execute("DELETE FROM cards WHERE card_id = ?", (cid,))
+
         await db.commit()
+
+        # ── Шаг 2: перенумерация ────────────────────────────────────────────
+        await status_msg.edit_text("🔢 Шаг 3/3: Перенумерую карты...")
+        cur2 = await db.execute("SELECT card_id FROM cards ORDER BY card_id ASC")
+        remaining = [r[0] for r in await cur2.fetchall()]
+
+        for new_id, old_id in enumerate(remaining, start=1):
+            if new_id != old_id:
+                # Временный отрицательный ID чтобы избежать конфликтов
+                tmp_id = -old_id
+                await db.execute("UPDATE cards     SET card_id = ? WHERE card_id = ?", (tmp_id, old_id))
+                await db.execute("UPDATE user_cards SET card_id = ? WHERE card_id = ?", (tmp_id, old_id))
+                await db.execute("UPDATE auctions  SET card_id = ? WHERE card_id = ?", (tmp_id, old_id))
+
+        # Применяем финальные ID
+        for new_id, old_id in enumerate(remaining, start=1):
+            if new_id != old_id:
+                tmp_id = -old_id
+                await db.execute("UPDATE cards     SET card_id = ? WHERE card_id = ?", (new_id, tmp_id))
+                await db.execute("UPDATE user_cards SET card_id = ? WHERE card_id = ?", (new_id, tmp_id))
+                await db.execute("UPDATE auctions  SET card_id = ? WHERE card_id = ?", (new_id, tmp_id))
+
+        # Сбрасываем AUTOINCREMENT счётчик
+        new_max = len(remaining)
+        await db.execute(
+            "INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('cards', ?)",
+            (new_max,))
+        await db.commit()
+
     await status_msg.edit_text(
-        f"✅ <b>Починка карт завершена!</b>\n\n"
-        f"✔️ Исправлено: <b>{fixed}</b>\n"
-        f"❌ Ошибок: <b>{failed}</b>",
+        f"✅ <b>Готово!</b>\n\n"
+        f"🃏 Всего карт было: <b>{total}</b>\n"
+        f"✔️ Починено: <b>{fixed}</b>\n"
+        f"⏭ Уже OK: <b>{skipped}</b>\n"
+        f"🗑 Удалено (битые): <b>{len(deleted_ids)}</b>\n"
+        f"🔢 Карт осталось: <b>{len(remaining)}</b> (пронумерованы 1–{len(remaining)})",
         parse_mode=ParseMode.HTML)
 
 
