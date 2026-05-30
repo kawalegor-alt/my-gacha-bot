@@ -2109,8 +2109,8 @@ async def word_trigger_card(m: Message):
         try:
             await m.reply_photo(card[3], caption=text_out, parse_mode=ParseMode.HTML)
             return
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"reply_photo failed for card {card[0]} (image_id={card[3]!r}): {e}")
     await m.answer(text_out, parse_mode=ParseMode.HTML)
 
 
@@ -2157,7 +2157,16 @@ async def addcard_cmd(m: Message):
         try:
             photos = await m.bot.get_user_profile_photos(target.id, limit=1)
             if photos.total_count > 0:
-                image_id = photos.photos[0][-1].file_id
+                raw_file_id = photos.photos[0][-1].file_id
+                # Аватарные file_id (от get_user_profile_photos) нельзя отправить повторно.
+                # Пересылаем фото боту/админу, чтобы получить нормальный переиспользуемый file_id.
+                try:
+                    sent_msg = await m.bot.send_photo(ADMIN_ID, raw_file_id)
+                    image_id = sent_msg.photo[-1].file_id
+                    await sent_msg.delete()
+                except Exception as e2:
+                    logging.warning(f"ADDCARD re-upload error: {e2}")
+                    image_id = raw_file_id  # запасной вариант
         except Exception as e:
             logging.warning(f"ADDCARD avatar error: {e}")
         if not image_id:
@@ -2271,6 +2280,71 @@ async def rig_cmd(m: Message):
         rig_remaining = count
         return await m.answer(f"🎯 Подкрут: 100% побед на {count} игр!")
     await m.answer("❌ Формат: /rig 100 [кол-во] или /rig off")
+
+
+# =============================================================================
+#  SSS RESET CD (/Sss) — быстрый сброс всех КД, только для админа
+# =============================================================================
+@dp.message(Command("Sss"))
+async def sss_reset_cd_cmd(m: Message):
+    if m.from_user.id != ADMIN_ID:
+        return
+    # Определяем цель: реплай, @username или ID в аргументе
+    uid, name, _ = await resolve_user(m)
+    if not uid:
+        await m.answer(
+            "❓ Укажи цель:\n"
+            "• <b>Реплай</b> на сообщение игрока\n"
+            "• <code>/Sss @username</code>\n"
+            "• <code>/Sss 123456789</code>",
+            parse_mode=ParseMode.HTML)
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE users SET last_daily='', last_gacha='', last_rob='' WHERE user_id = ?",
+            (uid,))
+        await db.commit()
+    await m.answer(
+        f"✅ Все КД сброшены для <b>{name}</b> (<code>{uid}</code>).",
+        parse_mode=ParseMode.HTML)
+
+
+# =============================================================================
+#  FIX CARDS (/fixcards) — починка file_id аватарок в БД
+# =============================================================================
+@dp.message(Command("fixcards"))
+async def fixcards_cmd(m: Message):
+    """Перезаливает все аватарные file_id (profile-photo тип) через send→delete,
+       чтобы получить нормальные переиспользуемые file_id."""
+    if m.from_user.id != ADMIN_ID:
+        return
+    status_msg = await m.answer("🔧 Начинаю починку карт... это может занять время.")
+    fixed = 0
+    failed = 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT card_id, name, image_id FROM cards WHERE image_id IS NOT NULL AND TRIM(image_id) != ''")
+        cards = await cur.fetchall()
+        for card_id, name, image_id in cards:
+            # Аватарные file_id от get_user_profile_photos начинаются с AgACAgIAAxUAA
+            # Обычные фото из сообщений — AgACAgIAAxkB
+            # Пробуем переслать каждую, у которой prefix не xkB (т.е. подозрительная)
+            if "AxUAA" in image_id or "AxkBAAI" not in image_id:
+                try:
+                    sent_msg = await m.bot.send_photo(ADMIN_ID, image_id)
+                    new_file_id = sent_msg.photo[-1].file_id
+                    await sent_msg.delete()
+                    await db.execute("UPDATE cards SET image_id = ? WHERE card_id = ?", (new_file_id, card_id))
+                    fixed += 1
+                    await asyncio.sleep(0.3)  # не спамим API
+                except Exception as e:
+                    log.warning(f"fixcards: card {card_id} ({name}) failed: {e}")
+                    failed += 1
+        await db.commit()
+    await status_msg.edit_text(
+        f"✅ <b>Починка карт завершена!</b>\n\n"
+        f"✔️ Исправлено: <b>{fixed}</b>\n"
+        f"❌ Ошибок: <b>{failed}</b>",
+        parse_mode=ParseMode.HTML)
 
 
 # =============================================================================
