@@ -2148,29 +2148,37 @@ async def addcard_cmd(m: Message):
             await _ensure_game_tables(db)
             dup_cur = await db.execute("SELECT card_id, name FROM cards WHERE source_user_id = ?", (target.id,))
             existing = await dup_cur.fetchone()
-        if existing:
-            return await m.answer(
-                f"❌ Карта этого юзера уже существует!\n\n🆔 ID: <b>{existing[0]}</b>\n"
-                f"👤 Имя: <b>{existing[1]}</b>\n\nИспользуй <code>/delcard {existing[0]}</code> чтобы удалить старую.",
-                parse_mode=ParseMode.HTML)
+        # --- Получаем новое фото ---
         image_id = None
         try:
             photos = await m.bot.get_user_profile_photos(target.id, limit=1)
             if photos.total_count > 0:
                 raw_file_id = photos.photos[0][-1].file_id
-                # Аватарные file_id (от get_user_profile_photos) нельзя отправить повторно.
-                # Пересылаем фото боту/админу, чтобы получить нормальный переиспользуемый file_id.
                 try:
                     sent_msg = await m.bot.send_photo(ADMIN_ID, raw_file_id)
                     image_id = sent_msg.photo[-1].file_id
                     await sent_msg.delete()
                 except Exception as e2:
                     logging.warning(f"ADDCARD re-upload error: {e2}")
-                    image_id = raw_file_id  # запасной вариант
+                    image_id = raw_file_id
         except Exception as e:
             logging.warning(f"ADDCARD avatar error: {e}")
         if not image_id:
             return await m.answer(f"❌ У <b>{card_name}</b> нет аватарки! Карту без фото создать нельзя.", parse_mode=ParseMode.HTML)
+
+        if existing:
+            # Карта уже есть — обновляем фото и имя
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "UPDATE cards SET image_id = ?, name = ? WHERE card_id = ?",
+                    (image_id, card_name, existing[0]))
+                await db.commit()
+            await m.answer(
+                f"🔄 Карта обновлена!\n\n🆔 ID: <b>{existing[0]}</b>\n👤 Имя: <b>{card_name}</b>\n"
+                f"⭐ Редкость: {RARITY_STARS.get(rarity, '⭐')}\n🖼 Аватар: обновлён",
+                parse_mode=ParseMode.HTML)
+            return
+
         async with aiosqlite.connect(DB_PATH) as db:
             await _ensure_game_tables(db)
             cur = await db.execute(
@@ -2513,6 +2521,52 @@ async def cleancards_cmd(m: Message):
         await m.answer(
             f"🧹 <b>Очистка карт без картинки</b>\n\nУдалено карт: <b>{len(removed)}</b>\n\n" + "\n".join(lines),
             parse_mode=ParseMode.HTML)
+
+
+# =============================================================================
+#  DEDUP CARDS (/dedupcards) — убрать дубликаты карт по всей БД
+# =============================================================================
+@dp.message(Command("dedupcards"))
+async def dedupcards_cmd(m: Message):
+    """
+    Сканирует всю БД и удаляет дубликаты карт у всех пользователей.
+    Оставляет по 1 копии каждой карты на человека.
+    Только для главных админов.
+    """
+    if not await is_main_admin(m.from_user.id):
+        return
+
+    await m.answer("🔍 Сканирую базу данных на дубликаты...", parse_mode=ParseMode.HTML)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Все записи user_cards, сгруппированные по (user_id, card_id)
+        # Берём id строки — оставим минимальный, остальные удалим
+        cur = await db.execute(
+            "SELECT id, user_id, card_id FROM user_cards ORDER BY user_id, card_id, id ASC"
+        )
+        rows = await cur.fetchall()
+
+        to_delete: list[int] = []
+        seen: set[tuple] = set()  # (user_id, card_id)
+
+        for row_id, user_id, card_id in rows:
+            key = (user_id, card_id)
+            if key not in seen:
+                seen.add(key)
+            else:
+                to_delete.append(row_id)
+
+        if not to_delete:
+            return await m.answer("✅ <b>Дубликатов не найдено!</b> База чистая 🎉", parse_mode=ParseMode.HTML)
+
+        placeholders = ",".join("?" * len(to_delete))
+        await db.execute(f"DELETE FROM user_cards WHERE id IN ({placeholders})", to_delete)
+        await db.commit()
+
+    await m.answer(
+        f"🧹 <b>Дубликаты убраны!</b>\n\n"
+        f"🗑 Удалено записей: <b>{len(to_delete)}</b>",
+        parse_mode=ParseMode.HTML)
 
 
 # =============================================================================
